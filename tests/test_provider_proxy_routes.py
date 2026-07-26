@@ -6,11 +6,31 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
+import pytest
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+import headroom.proxy.ssrf as ssrf_module
 from headroom.providers.codex.runtime import CodexRoutingDecision
 from headroom.proxy.server import HeadroomProxy, ProxyConfig, create_app
+
+
+@pytest.fixture(autouse=True)
+def _resolve_test_hosts_as_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the .example hosts in this module resolve to a public address.
+
+    The SSRF guard (headroom/proxy/ssrf.py) fails closed on a hostname that
+    does not resolve, which is correct in production but would block every
+    fake host used here. Stubbing resolution keeps these tests about target
+    selection rather than about DNS.
+    """
+    import socket as _socket
+
+    monkeypatch.setattr(
+        ssrf_module.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
 
 
 def _app() -> Any:

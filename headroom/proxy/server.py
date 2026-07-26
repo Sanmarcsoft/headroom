@@ -169,6 +169,11 @@ from headroom.proxy.request_logger import RequestLogger  # noqa: F401
 from headroom.proxy.savings_tracker import LITELLM_AVAILABLE
 from headroom.proxy.semantic_cache import SemanticCache  # noqa: F401
 from headroom.proxy.ssl_context import build_httpx_verify
+from headroom.proxy.ssrf import (
+    UPSTREAM_BASE_URL_HEADER,
+    UpstreamBaseUrlBlocked,
+    check_upstream_base_url,
+)
 from headroom.proxy.tool_schema_savings_policy import tool_schema_saved_from_tags
 from headroom.proxy.warmup import WarmupRegistry
 from headroom.proxy.ws_session_registry import WebSocketSessionRegistry
@@ -3001,6 +3006,31 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     # requests so telemetry can segment by integration surface. Registered
     # before extension middleware so any extension-level auth/guards run
     # outermost and we don't count requests they reject.
+    # SSRF boundary guard. The x-headroom-base-url header is read by four
+    # separate call sites (the OpenAI handlers, /v1/messages, the catch-all
+    # passthrough, and Azure-style target selection). Guarding any one of them
+    # leaves the others open, so the policy is enforced here, once, before
+    # routing. The per-handler checks stay as defense in depth.
+    @app.middleware("http")
+    async def _guard_upstream_base_url(request, call_next):
+        try:
+            check_upstream_base_url(request.headers.get(UPSTREAM_BASE_URL_HEADER))
+        except UpstreamBaseUrlBlocked as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": (
+                            "upstream base URL rejected by SSRF policy: "
+                            f"{exc.hostname!r} resolves to a loopback, private, "
+                            "link-local or otherwise reserved address"
+                        ),
+                    }
+                },
+            )
+        return await call_next(request)
+
     @app.middleware("http")
     async def _record_headroom_stack(request, call_next):
         started = time.perf_counter()

@@ -11,7 +11,11 @@ These tests pin the resolution contract:
 - header absent   → configured ``OPENAI_API_URL`` fallback
 - header empty or whitespace-only → fallback (no blanking)
 - header resolves to a loopback/private/link-local/metadata address → SSRF
-  guard blocks it and falls back (see ``TestSsrfGuard`` below)
+  guard RAISES ``UpstreamBaseUrlBlocked`` (see ``TestSsrfGuard`` below). It
+  deliberately does not fall back: silently substituting the default upstream
+  would forward the caller's prompt and Authorization header to a provider
+  they never named. Policy lives in ``headroom/proxy/ssrf.py`` and is enforced
+  at the ASGI boundary in ``headroom/proxy/server.py``.
 """
 
 from __future__ import annotations
@@ -25,8 +29,9 @@ httpx = pytest.importorskip("httpx")
 
 from starlette.datastructures import Headers  # noqa: E402
 
-from headroom.proxy.handlers import openai as openai_handler  # noqa: E402
+import headroom.proxy.ssrf as ssrf_module  # noqa: E402
 from headroom.proxy.handlers.openai import OpenAIHandlerMixin  # noqa: E402
+from headroom.proxy.ssrf import UpstreamBaseUrlBlocked  # noqa: E402
 
 # A fixed, non-private address used to stub DNS resolution so the
 # header-parsing tests below don't depend on real network access or on the
@@ -57,7 +62,7 @@ def _stub_proxy(fallback_url: str) -> OpenAIHandlerMixin:
 
 
 def test_header_overrides_configured_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(openai_handler.socket, "getaddrinfo", lambda *a, **k: _PUBLIC_ADDRINFO)
+    monkeypatch.setattr(ssrf_module.socket, "getaddrinfo", lambda *a, **k: _PUBLIC_ADDRINFO)
     proxy = _stub_proxy("https://api.openai.test")
     # The transport sends the upstream origin (no /v1 path).
     request = _FakeRequest({"x-headroom-base-url": "https://gateway.example"})
@@ -85,7 +90,7 @@ def test_empty_header_falls_back_to_configured_url() -> None:
 
 def test_header_lookup_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
     """Transports may send mixed-case header names; lookup must still resolve."""
-    monkeypatch.setattr(openai_handler.socket, "getaddrinfo", lambda *a, **k: _PUBLIC_ADDRINFO)
+    monkeypatch.setattr(ssrf_module.socket, "getaddrinfo", lambda *a, **k: _PUBLIC_ADDRINFO)
     proxy = _stub_proxy("https://api.openai.test")
     # Real transports routinely send Title-Case header names.
     request = _FakeRequest({"X-Headroom-Base-Url": "https://gateway.example"})
@@ -96,7 +101,7 @@ def test_header_lookup_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> N
 def test_header_with_subpath_preserves_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """A custom upstream served from a sub-path (e.g. /api/v1) must keep the path,
     not be collapsed to the bare origin (#2047)."""
-    monkeypatch.setattr(openai_handler.socket, "getaddrinfo", lambda *a, **k: _PUBLIC_ADDRINFO)
+    monkeypatch.setattr(ssrf_module.socket, "getaddrinfo", lambda *a, **k: _PUBLIC_ADDRINFO)
     proxy = _stub_proxy("https://api.openai.test")
     request = _FakeRequest({"x-headroom-base-url": "https://gateway.example/api/v1"})
 
@@ -134,27 +139,30 @@ class TestSsrfGuard:
     ) -> None:
         family = socket.AF_INET6 if ":" in address else socket.AF_INET
         monkeypatch.setattr(
-            openai_handler.socket,
+            ssrf_module.socket,
             "getaddrinfo",
             lambda *a, **k: [(family, socket.SOCK_STREAM, 6, "", (address, 0))],
         )
         proxy = _stub_proxy("https://api.openai.test")
         request = _FakeRequest({"x-headroom-base-url": "https://internal.attacker.test"})
 
-        assert proxy._resolve_openai_upstream(request) == "https://api.openai.test"
+        with pytest.raises(UpstreamBaseUrlBlocked):
+            proxy._resolve_openai_upstream(request)
 
     def test_ip_literal_loopback_header_is_blocked_without_dns(self) -> None:
         """A raw loopback IP literal in the header needs no DNS lookup to catch."""
         proxy = _stub_proxy("https://api.openai.test")
         request = _FakeRequest({"x-headroom-base-url": "http://127.0.0.1:9999"})
 
-        assert proxy._resolve_openai_upstream(request) == "https://api.openai.test"
+        with pytest.raises(UpstreamBaseUrlBlocked):
+            proxy._resolve_openai_upstream(request)
 
     def test_ip_literal_metadata_header_is_blocked_without_dns(self) -> None:
         proxy = _stub_proxy("https://api.openai.test")
         request = _FakeRequest({"x-headroom-base-url": "http://169.254.169.254"})
 
-        assert proxy._resolve_openai_upstream(request) == "https://api.openai.test"
+        with pytest.raises(UpstreamBaseUrlBlocked):
+            proxy._resolve_openai_upstream(request)
 
     def test_any_resolved_record_being_private_blocks(
         self, monkeypatch: pytest.MonkeyPatch
@@ -162,7 +170,7 @@ class TestSsrfGuard:
         """One public + one private DNS answer must still block -- not just a
         first-record-only check."""
         monkeypatch.setattr(
-            openai_handler.socket,
+            ssrf_module.socket,
             "getaddrinfo",
             lambda *a, **k: [
                 (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
@@ -172,20 +180,22 @@ class TestSsrfGuard:
         proxy = _stub_proxy("https://api.openai.test")
         request = _FakeRequest({"x-headroom-base-url": "https://mixed.example"})
 
-        assert proxy._resolve_openai_upstream(request) == "https://api.openai.test"
+        with pytest.raises(UpstreamBaseUrlBlocked):
+            proxy._resolve_openai_upstream(request)
 
     def test_resolution_failure_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _raise(*args: object, **kwargs: object) -> None:
             raise socket.gaierror("nodename nor servname provided, or not known")
 
-        monkeypatch.setattr(openai_handler.socket, "getaddrinfo", _raise)
+        monkeypatch.setattr(ssrf_module.socket, "getaddrinfo", _raise)
         proxy = _stub_proxy("https://api.openai.test")
         request = _FakeRequest({"x-headroom-base-url": "https://unresolvable.invalid"})
 
-        assert proxy._resolve_openai_upstream(request) == "https://api.openai.test"
+        with pytest.raises(UpstreamBaseUrlBlocked):
+            proxy._resolve_openai_upstream(request)
 
     def test_public_address_is_allowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(openai_handler.socket, "getaddrinfo", lambda *a, **k: _PUBLIC_ADDRINFO)
+        monkeypatch.setattr(ssrf_module.socket, "getaddrinfo", lambda *a, **k: _PUBLIC_ADDRINFO)
         proxy = _stub_proxy("https://api.openai.test")
         request = _FakeRequest({"x-headroom-base-url": "https://gateway.example"})
 
@@ -198,7 +208,7 @@ class TestSsrfGuard:
         behavior for operators who legitimately proxy to an internal
         OpenAI-compatible gateway (LiteLLM, vLLM) on an RFC1918 address."""
         monkeypatch.setattr(
-            openai_handler.socket,
+            ssrf_module.socket,
             "getaddrinfo",
             lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))],
         )
@@ -209,4 +219,4 @@ class TestSsrfGuard:
         assert proxy._resolve_openai_upstream(request) == "https://internal-gateway.corp"
 
     def test_opt_in_is_off_by_default(self) -> None:
-        assert openai_handler._allow_private_upstream_base_url() is False
+        assert ssrf_module.allow_private_upstream_base_url() is False

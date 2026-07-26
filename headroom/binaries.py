@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from headroom._subprocess import run
+from headroom.envflags import env_flag_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +323,11 @@ def _sha256_file(path: Path) -> str:
 
 def _verify_sha256(path: Path, expected: str | None) -> None:
     if not expected:
-        if os.environ.get("HEADROOM_BINARIES_ALLOW_UNPINNED"):
+        # Strict parse, not truthiness. A bare os.environ.get() treats
+        # HEADROOM_BINARIES_ALLOW_UNPINNED=0 and =false as ENABLED, which is the
+        # opposite of what an operator typing them intends, and this flag is the
+        # one that guards whether unverified bytes get executed.
+        if env_flag_enabled("HEADROOM_BINARIES_ALLOW_UNPINNED"):
             logger.warning(
                 "binary %s downloaded without sha256 pin "
                 "(HEADROOM_BINARIES_ALLOW_UNPINNED is set; this is a supply-chain risk)",
