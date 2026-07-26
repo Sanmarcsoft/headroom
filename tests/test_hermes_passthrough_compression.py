@@ -33,6 +33,20 @@ from headroom.proxy.loopback_guard import require_loopback  # noqa: E402
 from headroom.proxy.server import ProxyConfig, create_app  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_connect_time_pinning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable connect-time IP pinning for this module.
+
+    These are compression-passthrough tests, not SSRF tests. The pinning
+    transport (headroom/proxy/pinned_transport.py) resolves any host outside
+    the configured upstream targets and rewrites the request URL to the
+    validated IP literal, which both performs real DNS in a unit test and
+    stops respx's hostname-based mocks from matching. The documented operator
+    opt-in is the supported way to switch pinning off.
+    """
+    monkeypatch.setenv("HEADROOM_ALLOW_PRIVATE_UPSTREAM_BASE_URL", "1")
+
+
 def _make_app(**kwargs: Any):
     """Create a minimal test app with loopback guard bypassed."""
     config = ProxyConfig(

@@ -157,6 +157,7 @@ from headroom.proxy.modes import (
     is_token_mode,
     normalize_proxy_mode,
 )
+from headroom.proxy.pinned_transport import build_pinned_transport
 from headroom.proxy.probe_recorder import probe_recorder_from_env
 from headroom.proxy.project_context import (
     classify_project,
@@ -634,6 +635,28 @@ def _apply_stateless_persistence(config: ProxyConfig) -> None:
     # created with a filesystem backend earlier in the process.
     reset_toin()
     get_toin(TOINConfig(storage_path=""))
+
+
+def _configured_upstream_hosts(provider_runtime: Any) -> set[str]:
+    """Hostnames of the proxy's own configured upstream targets.
+
+    These are operator-configured, never caller-steerable, so they are exempt
+    from connect-time pinning and keep their pooled connections. Anything else
+    reaching the provider client can only have come from a caller-supplied base
+    URL, which is exactly what the SSRF policy governs.
+    """
+    hosts: set[str] = set()
+    targets = getattr(provider_runtime, "api_targets", None)
+    if targets is None:
+        return hosts
+    for field in ("anthropic", "openai", "gemini", "cloudcode", "vertex"):
+        url = getattr(targets, field, None)
+        if not url:
+            continue
+        host = urlsplit(url).hostname
+        if host:
+            hosts.add(host.lower())
+    return hosts
 
 
 def _provider_httpx_client_options(
@@ -1627,11 +1650,32 @@ class HeadroomProxy(
         # HEADROOM_TLS_STRICT=0, else httpx's default strict verification.
         _verify = build_httpx_verify()
         _http2, _client_kwargs = _provider_httpx_client_options(self.config, _verify)
-        self.http_client = httpx.AsyncClient(http2=_http2, **_client_kwargs)
+        # Connect-time IP pinning closes the DNS-rebinding gap the SSRF guard
+        # cannot: the guard resolves the caller-supplied hostname when it parses
+        # the header, httpx resolved it again when it opened the socket, and
+        # nothing tied the two together. The transport pins the address it
+        # validated. Only hosts outside the configured upstream targets are
+        # pinned, so ordinary provider traffic keeps its connection reuse.
+        _trusted_upstream_hosts = _configured_upstream_hosts(self.provider_runtime)
+        self.http_client = httpx.AsyncClient(
+            http2=_http2,
+            transport=build_pinned_transport(
+                _trusted_upstream_hosts, http2=_http2, **_client_kwargs
+            ),
+            **_client_kwargs,
+        )
         # Reuse the primary client when HTTP/2 is already off; otherwise keep a
         # dedicated HTTP/1.1 client for ChatGPT passthrough.
         self.http_client_h1 = (
-            self.http_client if not _http2 else httpx.AsyncClient(http2=False, **_client_kwargs)
+            self.http_client
+            if not _http2
+            else httpx.AsyncClient(
+                http2=False,
+                transport=build_pinned_transport(
+                    _trusted_upstream_hosts, http2=False, **_client_kwargs
+                ),
+                **_client_kwargs,
+            )
         )
         logger.info("Headroom Proxy started (version %s)", __version__)
         logger.info(f"Optimization: {'ENABLED' if self.config.optimize else 'DISABLED'}")
