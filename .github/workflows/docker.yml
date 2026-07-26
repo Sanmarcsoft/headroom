@@ -53,6 +53,18 @@ jobs:
   # `docker-manifest` job below combines the per-arch digests into the
   # final multi-arch tagged manifest, which is what users pull by tag.
   docker-build:
+    # Publishing is opt-in, and the opt-in is deliberately absent on forks.
+    #
+    # This workflow pushes to ghcr.io/${{ github.repository }} and cosign-signs
+    # the result with the repository's own keyless Sigstore identity. On a fork
+    # that mirrors upstream, "sync" means pushing to main, so every sync
+    # published signed images of code the fork owner had never reviewed. That
+    # applies a first-party attestation to third-party work, which is the
+    # opposite of what a signature is for.
+    #
+    # Set the repository variable HEADROOM_PUBLISH_IMAGES to 'true' to enable.
+    # Leave it unset anywhere the images are not genuinely yours to vouch for.
+    if: vars.HEADROOM_PUBLISH_IMAGES == 'true'
     runs-on: ${{ matrix.arch.runs_on }}
     timeout-minutes: 75
     strategy:
@@ -219,6 +231,10 @@ jobs:
   # into a single multi-arch index manifest, applies the metadata-action
   # tags, and that manifest is what users pull by `:tag`.
   docker-manifest:
+    # Same opt-in gate as docker-build. `needs` alone would already skip this
+    # when the build is skipped, but the guard is repeated so that removing or
+    # reordering a dependency can never silently re-enable publishing.
+    if: vars.HEADROOM_PUBLISH_IMAGES == 'true'
     needs: docker-build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -387,6 +403,8 @@ jobs:
     # variant manifest job has finished, so GHCR's package version
     # listing (sorted by created_at) shows the root image with :latest
     # at the top instead of whichever variant happened to finish last.
+    # Same opt-in gate as docker-build, repeated for the same reason.
+    if: vars.HEADROOM_PUBLISH_IMAGES == 'true'
     needs: docker-manifest
     runs-on: ubuntu-24.04
     timeout-minutes: 10
