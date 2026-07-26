@@ -5,6 +5,7 @@ No network access. A fake urlopen serves bytes from an in-memory fixture.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import sys
@@ -26,6 +27,8 @@ def _clear_caches(monkeypatch, tmp_path):
     monkeypatch.setenv("HEADROOM_BINARIES_CACHE", str(tmp_path / "cache"))
     monkeypatch.delenv("HEADROOM_BINARIES_MIRROR", raising=False)
     monkeypatch.delenv("HEADROOM_BINARIES_OFFLINE", raising=False)
+    monkeypatch.delenv("HEADROOM_BINARIES_ALLOW_UNPINNED", raising=False)
+    monkeypatch.delenv("HEADROOM_BINARIES_MIRROR_CONFIRM", raising=False)
     yield
     binaries.detect_platform.cache_clear()
     binaries._registry.cache_clear()
@@ -88,6 +91,22 @@ def fake_urlopen(monkeypatch):
 
     monkeypatch.setattr(binaries.urllib.request, "urlopen", fake)
     return served
+
+
+@contextlib.contextmanager
+def _pinned(asset: dict, data: bytes):
+    """Temporarily pin a registry asset to the sha256 of a synthetic archive.
+
+    Shipped assets now carry real sha256 pins and verification fails closed, so
+    a test that serves its own fixture bytes has to pin to those bytes. Restores
+    the shipped pin on exit so tests stay independent.
+    """
+    original = asset.get("sha256")
+    asset["sha256"] = hashlib.sha256(data).hexdigest()
+    try:
+        yield
+    finally:
+        asset["sha256"] = original
 
 
 # -------- Platform detection --------------------------------------------- #
@@ -186,7 +205,9 @@ def test_offline_error_when_fetch_required(monkeypatch):
 
 
 def test_mirror_substitution(monkeypatch):
-    monkeypatch.setenv("HEADROOM_BINARIES_MIRROR", "https://mirror.example.com/gh")
+    mirror = "https://mirror.example.com/gh"
+    monkeypatch.setenv("HEADROOM_BINARIES_MIRROR", mirror)
+    monkeypatch.setenv("HEADROOM_BINARIES_MIRROR_CONFIRM", mirror)
     out = binaries._mirror_url(
         "https://github.com/Wilfred/difftastic/releases/download/0.64.0/x.tar.gz"
     )
@@ -218,7 +239,8 @@ def test_mirror_url_with_query_params_strips_them_from_download_filename(monkeyp
     asset["url"] = tokened_url
     fake_urlopen[tokened_url] = archive
     try:
-        path = binaries.resolve("difft")
+        with _pinned(asset, archive):
+            path = binaries.resolve("difft")
         assert path.exists()
         assert path.read_bytes() == b"ok"
     finally:
@@ -234,12 +256,14 @@ def test_fetch_extract_and_cache_tar_gz(monkeypatch, fake_urlopen, tmp_path):
     url = "https://github.com/Wilfred/difftastic/releases/download/0.64.0/difft-aarch64-apple-darwin.tar.gz"
     fake_urlopen[url] = archive
 
-    path = binaries.resolve("difft")
-    assert path.exists()
-    assert path.read_bytes() == payload
-    # Second call should use cache (no further fetch).
-    fake_urlopen.pop(url)  # remove so a refetch would error
-    path2 = binaries.resolve("difft")
+    asset = binaries._registry()["tools"]["difft"]["assets"]["darwin-aarch64"]
+    with _pinned(asset, archive):
+        path = binaries.resolve("difft")
+        assert path.exists()
+        assert path.read_bytes() == payload
+        # Second call should use cache (no further fetch).
+        fake_urlopen.pop(url)  # remove so a refetch would error
+        path2 = binaries.resolve("difft")
     assert path2 == path
 
 
@@ -251,7 +275,9 @@ def test_fetch_extract_zip(monkeypatch, fake_urlopen):
     url = "https://github.com/boyter/scc/releases/download/v3.5.0/scc_Windows_x86_64.zip"
     fake_urlopen[url] = archive
 
-    path = binaries.resolve("scc")
+    asset = binaries._registry()["tools"]["scc"]["assets"]["windows-x86_64"]
+    with _pinned(asset, archive):
+        path = binaries.resolve("scc")
     assert path.exists()
     assert path.name.endswith("scc.exe")
     assert path.read_bytes() == payload
@@ -264,6 +290,7 @@ def test_sha256_mismatch_raises_and_deletes(monkeypatch, fake_urlopen, tmp_path)
     # Override the registry entry for difft to include a bogus sha256.
     reg = binaries._registry()
     asset = reg["tools"]["difft"]["assets"]["darwin-aarch64"]
+    original = asset.get("sha256")
     asset["sha256"] = "deadbeef" * 8  # wrong
     archive = _make_tar_gz({"difft": b"hi"})
     fake_urlopen[asset["url"]] = archive
@@ -272,7 +299,7 @@ def test_sha256_mismatch_raises_and_deletes(monkeypatch, fake_urlopen, tmp_path)
         with pytest.raises(binaries.Sha256Mismatch):
             binaries.resolve("difft")
     finally:
-        asset["sha256"] = None  # restore
+        asset["sha256"] = original  # restore
 
 
 def test_sha256_match_passes(monkeypatch, fake_urlopen):
@@ -282,13 +309,14 @@ def test_sha256_match_passes(monkeypatch, fake_urlopen):
     good = hashlib.sha256(archive).hexdigest()
     reg = binaries._registry()
     asset = reg["tools"]["difft"]["assets"]["darwin-aarch64"]
+    original = asset.get("sha256")
     asset["sha256"] = good
     fake_urlopen[asset["url"]] = archive
     try:
         path = binaries.resolve("difft")
         assert path.read_bytes() == b"hello"
     finally:
-        asset["sha256"] = None
+        asset["sha256"] = original
 
 
 # -------- status() ------------------------------------------------------- #
@@ -338,7 +366,8 @@ def test_ensure_tools_partial_failure_proxy_still_starts(monkeypatch):
 
     monkeypatch.setattr(binaries.urllib.request, "urlopen", selective_urlopen)
 
-    result = binaries.ensure_tools(quiet=True)
+    with _pinned(scc_asset, scc_tar):
+        result = binaries.ensure_tools(quiet=True)
     # scc succeeded; difft failed but ensure_tools() did not crash.
     assert result["scc"] is not None
     assert result["difft"] is None

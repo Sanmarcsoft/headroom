@@ -1,6 +1,6 @@
 """Best-effort "is a newer Headroom released?" check.
 
-This module is intentionally dependency-light (stdlib + ``packaging`` only —
+This module is intentionally dependency-light (stdlib + ``packaging`` only:
 ``httpx`` lives in the ``[proxy]`` extra and must not be required by the base
 CLI). It mirrors the telemetry beacon contract: opt-out, cached, fire-and-
 forget, and it must never raise into a caller or block startup.
@@ -8,9 +8,16 @@ forget, and it must never raise into a caller or block startup.
 Two halves, deliberately split so a background thread never races stdout:
 
 * :func:`maybe_check_async` performs the (rate-limited) network probe on a
-  daemon thread and writes the result to a cache file. It prints nothing.
+  daemon thread and writes the result to a cache file. It prints nothing on
+  stdout. On the very first check ever (no cache file present yet), it writes
+  a single disclosure line to *stderr* (see :func:`format_first_run_notice`),
+  naming the destination contacted and how to opt out, in the same style as
+  ``headroom.telemetry.beacon.format_telemetry_notice``. Stderr rather than
+  stdout so it still cannot corrupt a caller's stdout output; it is a
+  one-time exception to "prints nothing", not a recurring banner (subsequent
+  daily checks stay silent).
 * :func:`format_update_notice` reads *only* the cache and returns a one-line
-  notice string (or ``None``). Callers own the rendering.
+  "update available" notice string (or ``None``). Callers own the rendering.
 
 Opt out with ``HEADROOM_UPDATE_CHECK=off``. Also skipped in ``--stateless``
 mode, in CI, inside Docker, and from a git checkout (developers manage their
@@ -22,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import urllib.request
@@ -83,7 +91,7 @@ def _is_source_checkout() -> bool:
 
 
 def _in_docker() -> bool:
-    """Best-effort container detection — image rebuilds, not self-update."""
+    """Best-effort container detection (image rebuilds, not self-update)."""
     try:
         return Path("/.dockerenv").exists() or bool(
             os.environ.get("HEADROOM_IN_DOCKER", "").strip()
@@ -96,7 +104,7 @@ def installed_version() -> str | None:
     """Return the *installed-distribution* version, or None.
 
     Deliberately uses ``importlib.metadata`` rather than
-    ``headroom._version.get_version()`` — the latter computes a synthetic
+    ``headroom._version.get_version()``: the latter computes a synthetic
     version from git history in a checkout, which would produce a meaningless
     comparison against PyPI.
     """
@@ -199,12 +207,27 @@ def fetch_latest_version(*, allow_pre: bool = False, timeout: float = 4.0) -> st
             _PYPI_JSON_URL,
             headers={"Accept": "application/json", "User-Agent": "headroom-update-check"},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 — fixed https URL
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (fixed https URL)
             data = json.loads(resp.read().decode("utf-8"))
         return _select_latest(data, allow_pre=allow_pre)
     except Exception:
         logger.debug("update_check: PyPI fetch failed", exc_info=True)
         return None
+
+
+def format_first_run_notice() -> str:
+    """Return the one-time opt-out disclosure for the background update check.
+
+    Mirrors ``headroom.telemetry.beacon.format_telemetry_notice``'s style: a
+    single line naming what happens, the destination contacted, and the env
+    var to disable it. Emitted by :func:`maybe_check_async` only on the very
+    first check (no cache file yet present); never repeated on subsequent
+    daily checks.
+    """
+    return (
+        f"Update check: contacting {_PYPI_JSON_URL} (at most once per day) to look for "
+        f"newer {PACKAGE_NAME} releases | Disable: HEADROOM_UPDATE_CHECK=off"
+    )
 
 
 def should_check(now: float | None = None) -> bool:
@@ -222,7 +245,7 @@ def should_check(now: float | None = None) -> bool:
 def run_check(*, allow_pre: bool = False, now: float | None = None) -> str | None:
     """Probe PyPI and update the cache. Returns the latest version or None.
 
-    Synchronous — used directly by ``headroom update`` and indirectly by
+    Synchronous; used directly by ``headroom update`` and indirectly by
     :func:`maybe_check_async`. Honors the enable gate.
     """
     if not is_update_check_enabled():
@@ -239,15 +262,24 @@ def maybe_check_async() -> threading.Thread | None:
     Returns the spawned thread (for tests) or None when the check is gated off,
     suppressed (checkout/Docker), or still within the TTL window. Never blocks
     and never raises.
+
+    On the very first check ever (no cache file present before this call),
+    the spawned thread writes :func:`format_first_run_notice` to stderr before
+    probing PyPI, so the opt-out network call is disclosed up front rather
+    than happening silently. Every later check (cache already exists) stays
+    silent, matching the pre-existing "prints nothing" contract.
     """
     try:
         if not is_update_check_enabled() or _is_source_checkout() or _in_docker():
             return None
+        first_run = read_cache() is None
         if not should_check():
             return None
 
         def _worker() -> None:
             try:
+                if first_run:
+                    print(format_first_run_notice(), file=sys.stderr, flush=True)
                 run_check()
             except Exception:
                 logger.debug("update_check: background check crashed", exc_info=True)
@@ -297,6 +329,7 @@ def format_update_notice() -> str | None:
 __all__ = [
     "PACKAGE_NAME",
     "fetch_latest_version",
+    "format_first_run_notice",
     "format_update_notice",
     "installed_version",
     "is_update_check_enabled",

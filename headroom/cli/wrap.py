@@ -1864,22 +1864,24 @@ def _serena_project_skip_reason(root: Path) -> str | None:
 def _index_serena_project(*, verbose: bool = False) -> None:
     """Warm Serena's symbol cache for the current project (non-fatal).
 
-    Runs ``serena project index`` (the same ``uvx --from git+…`` launch used to
-    start the MCP server) in the project directory so the first symbol query is
-    not paying for a cold index. Timeout-guarded and best-effort: Serena also
-    indexes lazily on demand, so a failure or timeout here never blocks the
-    wrap.
+    Runs ``serena project index`` using the pinned SERENA_PACKAGE_SPEC (the
+    same immutable git ref used to start the MCP server) in the project
+    directory so the first symbol query is not paying for a cold index.
+    Timeout-guarded and best-effort: Serena also indexes lazily on demand, so
+    a failure or timeout here never blocks the wrap.
     """
     if shutil.which("uvx") is None:
         if verbose:
-            click.echo("  Serena: uvx not found — skipping pre-index")
+            click.echo("  Serena: uvx not found - skipping pre-index")
         return
+    from headroom.mcp_registry.install import SERENA_PACKAGE_SPEC
+
     try:
         result = run(
             [
                 "uvx",
                 "--from",
-                "git+https://github.com/oraios/serena",
+                SERENA_PACKAGE_SPEC,
                 "serena",
                 "project",
                 "index",

@@ -81,6 +81,27 @@ class SQLiteBackend:
         self._conn = self._open()
 
     def _open(self) -> sqlite3.Connection:
+        # Originals can contain sensitive tool output (file contents,
+        # command output) — keep the database private to the user.
+        #
+        # Pre-create the main db file *and* its WAL/SHM siblings at 0600
+        # before sqlite3.connect() ever touches them. sqlite3.connect()
+        # creates a missing file at the process's umask-derived default
+        # mode (commonly 0644, world-readable) and WAL mode creates the
+        # ``-wal``/``-shm`` files the same way the first time a write
+        # commits — both would otherwise sit at that permissive mode for
+        # however long it takes a later chmod to catch up (a genuine
+        # TOCTOU window, not just theoretical: another local user or
+        # process can read the file in that gap). Pre-creating the file
+        # first (idempotent, content-preserving — see
+        # ``paths.touch_private_file``) means every one of these later
+        # calls only *opens* an already-0600 file, so the window never
+        # opens at all. Also self-heals a file that predates this fix.
+        from ...paths import touch_private_file
+
+        for suffix in ("", "-wal", "-shm"):
+            touch_private_file(Path(str(self._path) + suffix))
+
         conn = sqlite3.connect(self._path, check_same_thread=False)
         # Wait for competing writers instead of failing with SQLITE_BUSY —
         # multiple proxy workers share this file, and writes are frequent
@@ -98,15 +119,14 @@ class SQLiteBackend:
             (time.time(),),
         )
         conn.commit()
-        # Originals can contain sensitive tool output (file contents,
-        # command output) — keep the database private to the user.
+        # Re-affirm mode post-open: WAL/SHM may only materialize once the
+        # commit above actually happens, and this also re-heals a
+        # pre-existing file whose mode predates this fix (touch_private_file
+        # logs, rather than swallows, any chmod failure).
         for suffix in ("", "-wal", "-shm"):
             p = Path(str(self._path) + suffix)
             if p.exists():
-                try:
-                    p.chmod(0o600)
-                except OSError:
-                    pass
+                touch_private_file(p)
         return conn
 
     @staticmethod

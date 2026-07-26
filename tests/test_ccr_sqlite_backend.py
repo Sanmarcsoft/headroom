@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from pathlib import Path
 
 import pytest
 
@@ -192,6 +193,64 @@ class TestMultiWorkerSafety:
         SQLiteBackend(db_path)
         mode = db_path.stat().st_mode & 0o777
         assert mode == 0o600
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+    def test_wal_and_shm_siblings_are_private(self, db_path):
+        """WAL-mode's companion files can also hold sensitive tool output
+        (they're the not-yet-checkpointed tail of the same data) and must
+        be as private as the main file."""
+        b = SQLiteBackend(db_path)
+        b.set("h1", make_entry())  # force a write so -wal/-shm exist
+        for suffix in ("-wal", "-shm"):
+            sibling = Path(str(db_path) + suffix)
+            if sibling.exists():
+                assert sibling.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+    def test_database_file_private_even_if_chmod_is_stubbed_out(self, db_path, monkeypatch):
+        """Regression guard for FIX 2's TOCTOU (and FIX 5's swallowed
+        failure): stub every chmod call to a no-op and confirm the file is
+        still created at 0600.
+
+        The vulnerable pattern is ``sqlite3.connect()`` (creates at the
+        umask-derived default mode) followed by a *separate*
+        ``path.chmod(0o600)`` wrapped in ``except OSError: pass`` -- if that
+        chmod call fails (or, as simulated here, does nothing), the file is
+        left world/group readable with no visible error. The fix
+        pre-creates the file at 0600 (via ``paths.touch_private_file``,
+        using ``os.open`` with the mode baked into the creating syscall)
+        *before* ``sqlite3.connect()`` ever touches it, so it stays secure
+        even with chmod entirely neutered.
+        """
+        monkeypatch.setattr(os, "chmod", lambda *a, **k: None)
+        old_umask = os.umask(0o022)
+        try:
+            SQLiteBackend(db_path)
+        finally:
+            os.umask(old_umask)
+        assert db_path.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+    def test_database_file_self_heals_preexisting_permissive_file(self, db_path):
+        """A file left over from a pre-fix install (created at 0644) must
+        be repaired back to 0600 the next time it's opened."""
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.touch(mode=0o644)
+        os.chmod(db_path, 0o644)
+        assert db_path.stat().st_mode & 0o777 == 0o644
+
+        SQLiteBackend(db_path)
+
+        assert db_path.stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+    def test_database_file_private_after_corruption_recovery(self, db_path):
+        """`_handle_db_error` unlinks and recreates the file -- the new
+        file must be private too, not just the original."""
+        b = SQLiteBackend(db_path)
+        b.set("h1", make_entry())
+        b._handle_db_error(sqlite3.DatabaseError("database disk image is malformed"), "get")
+        assert db_path.stat().st_mode & 0o777 == 0o600
 
 
 class TestDefaults:

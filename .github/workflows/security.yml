@@ -100,9 +100,21 @@ jobs:
       - name: Install gitleaks
         run: |
           version=8.18.4
-          curl -sSfL \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz" \
-            -o /tmp/gitleaks.tar.gz
+          asset="gitleaks_${version}_linux_x64.tar.gz"
+          base_url="https://github.com/gitleaks/gitleaks/releases/download/v${version}"
+
+          curl -sSfL "${base_url}/${asset}" -o /tmp/gitleaks.tar.gz
+          curl -sSfL "${base_url}/gitleaks_${version}_checksums.txt" -o /tmp/gitleaks_checksums.txt
+
+          expected="$(grep " ${asset}\$" /tmp/gitleaks_checksums.txt | awk '{print $1}')"
+          if [ -z "$expected" ]; then
+            echo "::error::no checksum entry for ${asset} in the published checksums file" >&2
+            exit 1
+          fi
+
+          # Fail the job on mismatch (sha256sum -c exits non-zero and stops the script under set -e).
+          echo "${expected}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version

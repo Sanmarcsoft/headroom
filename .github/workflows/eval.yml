@@ -10,6 +10,13 @@ on:
       - 'headroom/evals/**'
       - 'headroom/compress.py'
 
+# Default permissions: read-only. Individual jobs override only what they need.
+# Mitigates CodeQL/CWE-275 (missing-workflow-permissions): the GITHUB_TOKEN
+# defaults to whatever the repo policy is, which can be read-write. Pinning
+# this here means even if the repo default changes, this workflow stays safe.
+permissions:
+  contents: read
+
 jobs:
   # Fast smoke test on PRs touching compression code (~$0.05, ~2 min)
   smoke-test:

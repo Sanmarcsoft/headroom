@@ -4,8 +4,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Headroom Settings</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/alpinejs@3.13.3/dist/cdn.min.js" defer></script>
+    <!-- cdn.tailwindcss.com is a JIT build server: it has no Access-Control-Allow-Origin
+         header, so a browser cannot validate a `integrity` attribute against it (SRI
+         requires a CORS-enabled fetch for cross-origin resources) and adding one would
+         just make the script fail to load. Pinned to the specific build (3.4.17) instead
+         of the mutable "latest" alias so it can't change under us silently. Vendoring the
+         Tailwind build locally (behind a static route in headroom/proxy/server.py) is the
+         real fix and is out of scope for this change; see the FIX 4 report note. -->
+    <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+    <script src="https://unpkg.com/alpinejs@3.13.3/dist/cdn.min.js"
+            integrity="sha384-Rpe/8orFUm5Q1GplYBHxbuA8Az8O8C5sAoOsdbRWkqPjKFaxPgGZipj4zeHL7lxX"
+            crossorigin="anonymous" defer></script>
     <script>
         (function () {
             const saved = localStorage.getItem('headroom-theme');

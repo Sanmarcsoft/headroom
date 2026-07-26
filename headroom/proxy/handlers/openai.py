@@ -9,9 +9,11 @@ import asyncio
 import contextlib
 import copy
 import hashlib
+import ipaddress
 import json
 import logging
 import os
+import socket
 import threading
 import time
 import uuid
@@ -127,6 +129,9 @@ _OPENAI_CHAT_COMPLETIONS_PATH = "/chat/completions"
 _OPENAI_RESPONSES_PATH = "/responses"
 _OPENAI_ORIGINAL_PATH_HEADER = "x-headroom-original-path"
 _OPENAI_BASE_URL_HEADER = "x-headroom-base-url"
+# Operator opt-in restoring the pre-fix, unrestricted x-headroom-base-url
+# behavior (see _is_blocked_ssrf_hostname). Off by default.
+_ALLOW_PRIVATE_UPSTREAM_BASE_URL_ENV = "HEADROOM_ALLOW_PRIVATE_UPSTREAM_BASE_URL"
 _decode_openai_bearer_payload = decode_openai_bearer_payload
 
 
@@ -215,6 +220,87 @@ def _resolve_openai_handler_path(
     return parsed.path
 
 
+def _allow_private_upstream_base_url() -> bool:
+    """Operator opt-in restoring the pre-fix, unrestricted upstream behavior.
+
+    Off by default. Some deployments legitimately proxy `x-headroom-base-url`
+    to an internal OpenAI-compatible gateway (self-hosted vLLM, LiteLLM) on an
+    RFC1918/loopback address; those operators must explicitly accept that any
+    caller who can reach this proxy can then also reach that internal target.
+    """
+    return os.environ.get(_ALLOW_PRIVATE_UPSTREAM_BASE_URL_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _is_blocked_ssrf_address(address: str) -> bool:
+    """Return True if ``address`` must not be reachable via a caller-supplied
+    upstream base URL.
+
+    Blocks loopback (127.0.0.0/8, ::1), RFC1918 private ranges, RFC4193 IPv6
+    ULA (fd00::/8, a subset of the stdlib's fc00::/7 ``is_private`` check),
+    link-local incl. the cloud-metadata address 169.254.169.254
+    (169.254.0.0/16, fe80::/10), and IPv4-mapped IPv6 forms of any of the
+    above (``::ffff:127.0.0.1`` etc -- ``ipaddress`` resolves these via the
+    embedded IPv4 address). Unparseable input fails closed (blocked).
+    """
+    try:
+        parsed: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(address)
+    except ValueError:
+        return True
+    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
+        parsed = parsed.ipv4_mapped
+    return bool(
+        parsed.is_private
+        or parsed.is_loopback
+        or parsed.is_link_local
+        or parsed.is_reserved
+        or parsed.is_unspecified
+        or parsed.is_multicast
+    )
+
+
+def _is_blocked_ssrf_hostname(hostname: str) -> bool:
+    """Resolve ``hostname`` and return True if it must be blocked as the
+    target of a caller-supplied ``x-headroom-base-url`` header.
+
+    An IP literal is checked directly, with no DNS lookup. A name is resolved
+    via ``socket.getaddrinfo`` and EVERY returned address is checked -- an
+    attacker who controls the DNS answer could otherwise order records so a
+    naive first-record-only check passes while another returned address is
+    private. Resolution failure fails closed (blocked): an unresolvable
+    upstream is refused, not silently allowed through.
+
+    Residual risk -- DNS rebinding: this resolves ``hostname`` once, here, at
+    header-parse time. The actual outbound request is made later by the
+    proxy's shared ``httpx.AsyncClient`` (headroom/proxy/server.py), which
+    re-resolves the hostname itself; that client's construction is out of
+    scope for this change. A hostname serving a public address on this lookup
+    and a private address moments later (an attacker-controlled low-TTL DNS
+    rebind) would still pass this guard and reach the private address at
+    actual connect time. Fully closing that gap needs connect-time IP pinning
+    (a custom httpx transport) in server.py -- a follow-up, not attempted
+    here.
+    """
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass  # Not an IP literal -- resolve it below.
+    else:
+        return _is_blocked_ssrf_address(hostname)
+
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except (socket.gaierror, UnicodeError, OSError):
+        return True  # Resolution failed -- fail closed.
+    if not infos:
+        return True
+    return any(_is_blocked_ssrf_address(info[4][0]) for info in infos)
+
+
 def _resolve_openai_upstream_base(request_headers: dict[str, str]) -> str | None:
     raw_base_url = _header_get(request_headers, _OPENAI_BASE_URL_HEADER)
     if raw_base_url is None:
@@ -223,6 +309,22 @@ def _resolve_openai_upstream_base(request_headers: dict[str, str]) -> str | None
     normalized = _normalize_origin(raw_base_url)
     if normalized is None:
         return None
+
+    # SSRF guard: x-headroom-base-url is caller-supplied. Without this check
+    # any caller could point the proxy's outbound request at loopback, the
+    # internal network, or a cloud metadata endpoint (headroomlabs-ai/headroom
+    # SSRF finding). See _is_blocked_ssrf_hostname for the DNS-rebinding
+    # caveat and _allow_private_upstream_base_url for the operator opt-out.
+    if not _allow_private_upstream_base_url():
+        hostname = urlparse(normalized).hostname
+        if hostname is None or _is_blocked_ssrf_hostname(hostname):
+            logger.warning(
+                "event=openai_upstream_base_blocked hostname=%s reason=ssrf_guard "
+                "(set %s=1 to allow internal upstream targets)",
+                hostname,
+                _ALLOW_PRIVATE_UPSTREAM_BASE_URL_ENV,
+            )
+            return None
 
     # _normalize_origin drops the path; re-attach it so a custom upstream served
     # from a sub-path (e.g. https://host/api/v1) is preserved rather than routed

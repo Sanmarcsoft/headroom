@@ -1,18 +1,24 @@
 """Fetcher for bundled CLI tool binaries.
 
-`pip install headroom-ai` pulls `ast-grep-cli` as a proper PyPI binary wheel
+pip install headroom-ai pulls ast-grep-cli as a proper PyPI binary wheel
 (core dependency), so ast-grep is always on PATH. The other two high-value
-tools — `difft` (difftastic) and `scc` — are fetched from pinned upstream
-GitHub releases at proxy startup, verified, cached per-user, and exec'd.
+tools (difft and scc) are fetched from pinned upstream GitHub releases at
+proxy startup, verified by SHA256, cached per-user, and exec'd.
 
 Supported platforms: linux (glibc + musl) x86_64/aarch64, macOS x86_64/arm64,
 Windows x86_64. Unsupported platforms raise PlatformNotSupported; callers in
 the compression pipeline should fall back to their non-accelerated path.
 
 Env vars:
-    HEADROOM_BINARIES_MIRROR   base URL that replaces https://github.com
-    HEADROOM_BINARIES_CACHE    override cache dir
-    HEADROOM_BINARIES_OFFLINE  if set, never reach the network
+    HEADROOM_BINARIES_MIRROR          base URL that replaces github.com
+                                      (requires matching CONFIRM)
+    HEADROOM_BINARIES_MIRROR_CONFIRM  must exactly equal MIRROR to activate
+                                      (prevents accidental activation from
+                                      inherited env; also rejects http://)
+    HEADROOM_BINARIES_CACHE           override cache dir
+    HEADROOM_BINARIES_OFFLINE         if set, never reach the network
+    HEADROOM_BINARIES_ALLOW_UNPINNED  if set, missing sha256 only warns
+                                      (default is hard error to fail closed)
 """
 
 from __future__ import annotations
@@ -46,7 +52,9 @@ __all__ = [
     "BinaryFetchError",
     "PlatformNotSupported",
     "Sha256Mismatch",
+    "Sha256Unpinned",
     "OfflineError",
+    "MirrorNotConfirmed",
     "PlatformKey",
     "detect_platform",
     "cache_dir",
@@ -76,8 +84,38 @@ class Sha256Mismatch(BinaryError):
     """Raised when a downloaded asset's SHA256 does not match the pin."""
 
 
+class Sha256Unpinned(BinaryError):
+    """Raised when an asset has no sha256 pin and HEADROOM_BINARIES_ALLOW_UNPINNED is not set."""
+
+
 class OfflineError(BinaryError):
     """Raised when a network fetch is required but HEADROOM_BINARIES_OFFLINE is set."""
+
+
+class MirrorNotConfirmed(BinaryError):
+    """Raised when HEADROOM_BINARIES_MIRROR is set without a matching CONFIRM
+    value or when the mirror uses an insecure http:// scheme.
+    """
+
+
+def _mirror_url(url: str) -> str:
+    mirror = os.environ.get("HEADROOM_BINARIES_MIRROR")
+    if not mirror:
+        return url
+    confirm = os.environ.get("HEADROOM_BINARIES_MIRROR_CONFIRM")
+    if confirm != mirror:
+        raise MirrorNotConfirmed(
+            f"HEADROOM_BINARIES_MIRROR is set to {mirror} but "
+            f"HEADROOM_BINARIES_MIRROR_CONFIRM does not match it. "
+            f"Set both to the same https:// value to confirm."
+        )
+    if not mirror.startswith("https://"):
+        raise MirrorNotConfirmed("Mirror must be https:// (http is rejected)")
+    # Only substitute the github.com host so that paths remain intact.
+    for prefix in ("https://github.com", "https://objects.githubusercontent.com"):
+        if url.startswith(prefix):
+            return mirror.rstrip("/") + url[len(prefix) :]
+    return url
 
 
 # ---------- Platform detection -------------------------------------------- #
@@ -221,17 +259,6 @@ def _asset_for_platform(tool: str, plat: PlatformKey) -> dict[str, Any]:
     return asset
 
 
-def _mirror_url(url: str) -> str:
-    mirror = os.environ.get("HEADROOM_BINARIES_MIRROR")
-    if not mirror:
-        return url
-    # Only substitute the github.com host so that paths remain intact.
-    for prefix in ("https://github.com", "https://objects.githubusercontent.com"):
-        if url.startswith(prefix):
-            return mirror.rstrip("/") + url[len(prefix) :]
-    return url
-
-
 # ---------- Download + verify --------------------------------------------- #
 
 
@@ -295,11 +322,18 @@ def _sha256_file(path: Path) -> str:
 
 def _verify_sha256(path: Path, expected: str | None) -> None:
     if not expected:
-        # Upstream release not SHA-pinned in registry. HTTPS + the GitHub CDN
-        # is the only integrity check. Log at INFO so verbose runs can see
-        # this state; `doctor` surfaces the same fact via `sha_pinned=False`.
-        logger.info("binary %s downloaded without sha256 pin (HTTPS trust only)", path.name)
-        return
+        if os.environ.get("HEADROOM_BINARIES_ALLOW_UNPINNED"):
+            logger.warning(
+                "binary %s downloaded without sha256 pin "
+                "(HEADROOM_BINARIES_ALLOW_UNPINNED is set; this is a supply-chain risk)",
+                path.name,
+            )
+            return
+        path.unlink(missing_ok=True)
+        raise Sha256Unpinned(
+            f"binary {path.name} has no sha256 pin in tools.json; "
+            "set HEADROOM_BINARIES_ALLOW_UNPINNED=1 to allow (risky)"
+        )
     got = _sha256_file(path)
     if got.lower() != expected.lower():
         path.unlink(missing_ok=True)
@@ -461,6 +495,10 @@ def resolve(tool: str) -> Path:
         url_path = urllib.parse.urlparse(url).path
         download_path = tmp_dir / (Path(url_path).name or "download")
         _download(url, download_path)
+        # Verification runs on the downloaded temp file before extraction
+        # and applies equally whether the source was GitHub, a mirror, or
+        # any other URL. With the unpinned guard below, a mirror cannot
+        # serve unpinned bytes.
         _verify_sha256(download_path, sha256)
         staging = tmp_dir / "out"
         _extract(download_path, member, staging)
@@ -489,8 +527,10 @@ def ensure_tools(quiet: bool = False) -> dict[str, Path | None]:
     PATH, already cached, or distributed via PyPI-only (ast-grep).
 
     Returns a map of tool_name -> resolved Path (or None if unsupported).
-    Never raises; unsupported platforms or offline errors are logged via
-    stderr and the tool is skipped.
+    Never raises; PlatformNotSupported, OfflineError, BinaryFetchError,
+    Sha256Mismatch, Sha256Unpinned, MirrorNotConfirmed, and OSError are
+    caught so proxy startup degrades gracefully (tool skipped, message on
+    stderr).
     """
     out: dict[str, Path | None] = {}
     for name in _registry().get("tools", {}):
@@ -505,6 +545,8 @@ def ensure_tools(quiet: bool = False) -> dict[str, Path | None]:
             OfflineError,
             BinaryFetchError,
             Sha256Mismatch,
+            Sha256Unpinned,
+            MirrorNotConfirmed,
             # Catch readonly / sandboxed filesystems (e.g. containerized
             # home dirs) so proxy startup never fails because the cache dir
             # can't be created. The interceptor fall back to no-op.

@@ -34,6 +34,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from headroom import paths
 from headroom.memory.backends.local import LocalBackend, LocalBackendConfig
 
 logger = logging.getLogger(__name__)
@@ -368,12 +369,25 @@ class BackendRouter:
                 self._backends.move_to_end(db_path)
                 return existing
 
-            db_path.parent.mkdir(parents=True, exist_ok=True)
+            # FIX 3: the memory DB is the most content-sensitive artifact
+            # Headroom writes — verbatim prompts and tool output across
+            # every project, for every storage mode (PROJECT/USER/GLOBAL
+            # all funnel through this one method) — and previously had
+            # zero permission hardening. ``ensure_private_dir`` makes the
+            # per-project/per-user directory 0700 (and self-heals one that
+            # predates this fix); ``touch_private_file`` pre-creates the
+            # main DB and its graph-store sibling at 0600 *before*
+            # LocalBackend's SQLite adapters ever open them, closing the
+            # same create-then-chmod TOCTOU class as FIX 1/FIX 2.
+            paths.ensure_private_dir(db_path.parent)
+            graph_db_path = db_path.with_name(f"{db_path.stem}_graph{db_path.suffix}")
+            paths.touch_private_file(db_path)
+            paths.touch_private_file(graph_db_path)
 
             template = self._config.backend_config_template
             cfg = LocalBackendConfig(
                 db_path=str(db_path),
-                graph_db_path=str(db_path.with_name(f"{db_path.stem}_graph{db_path.suffix}")),
+                graph_db_path=str(graph_db_path),
                 embedder_backend=template.embedder_backend,
                 embedder_model=template.embedder_model,
                 vector_dimension=template.vector_dimension,
