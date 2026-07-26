@@ -118,29 +118,84 @@ def test_opt_in_is_strictly_parsed(monkeypatch: pytest.MonkeyPatch, value: str) 
 
 
 def test_every_header_sink_is_covered_by_the_shared_guard() -> None:
-    """Regression gate: the header must not be read anywhere that bypasses policy.
+    """Regression gate: no module may read the header without the shared guard.
 
-    This is the test that would have caught the original finding. Any new call
-    site reading the raw header has to either import the shared guard or be
-    added here deliberately.
+    The first version of this test grepped for the literal header string and
+    exempted any file containing the word "ssrf". A security review defeated
+    both halves against the real logic: a sink using the UPSTREAM_BASE_URL_HEADER
+    constant was invisible to the regex, and an unrelated comment mentioning
+    ssrf suppressed a genuine offender. This version matches the constant too
+    and requires the guard to actually be imported, with an explicit allowlist
+    instead of a keyword escape hatch.
     """
     import pathlib
     import re
 
+    # Modules permitted to read the header without importing the guard, with
+    # the reason. Anything not listed must route through the shared policy.
+    ALLOWED: dict[str, str] = {
+        "headroom/proxy/ssrf.py": "defines the policy",
+        "headroom/proxy/helpers.py": "strips internal headers before forwarding",
+        "headroom/providers/opencode/runtime.py": "docstring reference only",
+    }
+
     root = pathlib.Path(__file__).resolve().parents[2] / "headroom"
+    repo = root.parent
+    # Matches headers.get("x-headroom-base-url"...) AND the constant form.
+    read_pattern = re.compile(
+        r"""(?:headers|request\.headers)\.get\(\s*(?:["']x-headroom-base-url["']|UPSTREAM_BASE_URL_HEADER|_OPENAI_BASE_URL_HEADER)""",
+        re.IGNORECASE,
+    )
     offenders: list[str] = []
-    for path in root.rglob("*.py"):
-        if path.name == "ssrf.py":
+    for path in sorted(root.rglob("*.py")):
+        rel = str(path.relative_to(repo))
+        if rel in ALLOWED:
             continue
         text = path.read_text(encoding="utf-8")
-        if "x-headroom-base-url" not in text:
+        if not read_pattern.search(text):
             continue
-        # Only flag real reads of the header value, not doc mentions.
-        reads = re.findall(r"headers\.get\(\s*[\"']x-headroom-base-url", text)
-        if reads and "ssrf" not in text:
-            offenders.append(str(path.relative_to(root.parent)))
+        # The guard must be imported by name, not merely mentioned.
+        if "check_upstream_base_url" not in text:
+            offenders.append(rel)
+
     assert offenders == [], (
-        "these modules read x-headroom-base-url without importing the SSRF "
-        f"guard: {offenders}. Enforcement is at the boundary middleware in "
-        "headroom/proxy/server.py; a new sink must route through it."
+        "these modules read the upstream base-URL header without importing "
+        f"check_upstream_base_url: {offenders}. Enforcement is the boundary "
+        "middleware in headroom/proxy/server.py; a new sink must route through "
+        "it, or be added to ALLOWED here with a reason."
     )
+
+
+def test_the_regression_gate_itself_catches_a_planted_sink(tmp_path) -> None:
+    """Prove the gate above is not defeatable the way its predecessor was.
+
+    A gate that cannot be shown to fire is not a gate. Both bypasses the
+    reviewer constructed are exercised here against the same pattern the real
+    test uses.
+    """
+    import re
+
+    read_pattern = re.compile(
+        r"""(?:headers|request\.headers)\.get\(\s*(?:["']x-headroom-base-url["']|UPSTREAM_BASE_URL_HEADER|_OPENAI_BASE_URL_HEADER)""",
+        re.IGNORECASE,
+    )
+
+    # Bypass 1: the constant form, invisible to the original literal-only regex.
+    via_constant = "base = headers.get(UPSTREAM_BASE_URL_HEADER)\n"
+    assert read_pattern.search(via_constant), "constant-form read must be detected"
+    assert "check_upstream_base_url" not in via_constant
+
+    # Bypass 2: the literal form plus an unrelated mention of ssrf, which used
+    # to suppress the finding entirely.
+    via_keyword = '# ssrf: handled elsewhere\nbase = headers.get("x-headroom-base-url")\n'
+    assert read_pattern.search(via_keyword), "literal-form read must be detected"
+    assert "check_upstream_base_url" not in via_keyword
+
+    # A properly guarded sink must NOT be flagged.
+    guarded = (
+        "from headroom.proxy.ssrf import check_upstream_base_url\n"
+        'base = headers.get("x-headroom-base-url")\n'
+        "check_upstream_base_url(base)\n"
+    )
+    assert read_pattern.search(guarded)
+    assert "check_upstream_base_url" in guarded

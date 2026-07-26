@@ -545,18 +545,37 @@ def ensure_tools(quiet: bool = False) -> dict[str, Path | None]:
                 out[name] = _path_lookup(name)
                 continue
             out[name] = resolve(name)
+        except (Sha256Mismatch, MirrorNotConfirmed) as e:
+            # INTEGRITY FAILURE, not a routine skip. A hash mismatch is the
+            # single highest-signal indicator that something tampered with the
+            # download path: a compromised release asset, a MITM, a poisoned
+            # mirror. The bytes are already deleted and never executed, so this
+            # is not an RCE path, but logging it identically to "this platform
+            # is unsupported" means the one event worth paging on is
+            # indistinguishable from weather. Separate class, error level,
+            # greppable marker.
+            out[name] = None
+            logger.error(
+                "event=binary_integrity_failure tool=%s error=%s "
+                "(downloaded bytes were rejected and deleted; investigate the "
+                "download path before re-running)",
+                name,
+                e,
+            )
+            if not quiet:
+                print(f"headroom: INTEGRITY FAILURE for {name}: {e}", file=sys.stderr)
         except (
             PlatformNotSupported,
             OfflineError,
             BinaryFetchError,
-            Sha256Mismatch,
             Sha256Unpinned,
-            MirrorNotConfirmed,
             # Catch readonly / sandboxed filesystems (e.g. containerized
             # home dirs) so proxy startup never fails because the cache dir
             # can't be created. The interceptor fall back to no-op.
             OSError,
         ) as e:
+            # Benign: unsupported platform, offline, no pin configured, or an
+            # unwritable cache dir. Skipping is the correct response.
             out[name] = None
             if not quiet:
                 print(f"headroom: skipping {name}: {e}", file=sys.stderr)

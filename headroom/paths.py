@@ -32,6 +32,7 @@ Implementation notes:
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import tempfile
@@ -205,12 +206,29 @@ def ensure_private_dir(path: Path, mode: int = 0o700) -> Path:
     itself never fails because of this secondary hardening step.
     """
 
+    # Record which ancestors are missing BEFORE creating them. mkdir(parents=True)
+    # applies `mode` only to the final component; every parent it creates along
+    # the way gets the umask default (commonly 0755), so a nested workspace path
+    # would end with a private leaf sitting under world-traversable parents.
+    missing: list[Path] = []
+    probe = path
+    while not probe.exists():
+        missing.append(probe)
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
+
     path.mkdir(parents=True, exist_ok=True, mode=mode)
     if os.name != "nt":
-        try:
-            path.chmod(mode)
-        except OSError as exc:
-            logger.warning("paths: failed to chmod dir %s to %o: %s", path, mode, exc)
+        # Harden the leaf first (self-heals a pre-existing permissive dir),
+        # then every ancestor this call actually created. Directories that
+        # already existed are left alone: they are not ours to re-permission.
+        for target in [path, *missing]:
+            try:
+                target.chmod(mode)
+            except OSError as exc:
+                logger.warning("paths: failed to chmod dir %s to %o: %s", target, mode, exc)
     return path
 
 
@@ -248,13 +266,34 @@ def touch_private_file(path: Path, mode: int = 0o600) -> None:
     hardening -- the file still gets created either way.
     """
 
-    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, mode)
-    os.close(fd)
-    if os.name != "nt":
-        try:
-            path.chmod(mode)
-        except OSError as exc:
-            logger.warning("paths: failed to chmod %s to %o: %s", path, mode, exc)
+    # O_NOFOLLOW so this cannot be turned into a primitive for chmod-ing an
+    # attacker-chosen file. Without it, a symlink pre-planted at `path` by
+    # anyone who can write the containing directory is followed, and the
+    # helper written to CLOSE a TOCTOU opens a different one instead. The
+    # cache path is operator-configurable (HEADROOM_CCR_SQLITE_PATH), so the
+    # containing directory is not always one we hardened.
+    flags = os.O_CREAT | os.O_RDWR
+    flags |= getattr(os, "O_NOFOLLOW", 0)  # not present on Windows
+    try:
+        fd = os.open(str(path), flags, mode)
+    except OSError as exc:
+        # ELOOP means the path is a symlink. Refuse rather than follow it.
+        if getattr(exc, "errno", None) == errno.ELOOP:
+            logger.error(
+                "paths: refusing to create %s through a symlink (possible tampering)", path
+            )
+            raise
+        raise
+    try:
+        # fchmod acts on the descriptor we just opened, so it cannot be
+        # redirected between the open and the chmod the way a path-based
+        # chmod can.
+        if os.name != "nt":
+            os.fchmod(fd, mode)
+    except OSError as exc:
+        logger.warning("paths: failed to chmod %s to %o: %s", path, mode, exc)
+    finally:
+        os.close(fd)
 
 
 def atomic_write_private(path: Path, data: str, *, mode: int = 0o600) -> None:
