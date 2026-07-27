@@ -1,0 +1,102 @@
+# Headroom optimization proxy as a durable sidecar for a code-server container.
+#
+# Both containers run on the same OrbStack/Docker host and talk over a
+# user-defined bridge network by DNS name. The proxy is NOT published to the
+# host or the LAN: it forwards requests that carry the caller's Anthropic
+# credentials, so only sibling containers on the shared network may reach it.
+#
+# Usage:
+#   cp .env.example .env      # then edit if your network/image differ
+#   docker compose up -d
+#
+# The client container reaches the proxy at:
+#   ANTHROPIC_BASE_URL=http://headroom:8787
+
+name: headroom-sidecar
+
+services:
+  headroom:
+    # Pinned to a git SHA, never a rolling tag. A rolling :latest is how a
+    # stale image silently lingers after a rebuild. Build with build.sh, which
+    # derives this tag from the commit it builds.
+    image: ${HEADROOM_IMAGE:?set HEADROOM_IMAGE in .env, e.g. sanmarcsoft/headroom:git-3e134bb0}
+    container_name: headroom
+
+    # Survives host reboot and `docker restart`. Not "always": "unless-stopped"
+    # honours a deliberate `docker stop` by an operator.
+    restart: unless-stopped
+
+    # Deliberately NO `ports:` mapping.
+    #
+    # Publishing 8787 would expose a proxy that relays caller-supplied
+    # Anthropic credentials to anything that can reach the host. Sibling
+    # containers on the network below reach it by service name instead.
+
+    # Bind inside the container to 0.0.0.0 so sibling containers can connect.
+    # This is safe precisely because the port is never published: the only
+    # reachable interface is the user-defined bridge.
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8787"
+      - "--mode"
+      - "${HEADROOM_MODE:-token}"
+      - "--backend"
+      - "${HEADROOM_BACKEND:-anthropic}"
+
+    environment:
+      # Canonical Headroom filesystem contract (upstream issue #175). HOME must
+      # agree with the workspace dir or the proxy writes state outside the
+      # volume and loses it on container recreation.
+      HOME: /data
+      HEADROOM_WORKSPACE_DIR: /data/.headroom
+      HEADROOM_CONFIG_DIR: /data/.headroom/config
+      PYTHONUNBUFFERED: "1"
+
+    volumes:
+      # Named volume so cache, memory and config survive `docker compose down`
+      # and image upgrades. A bind mount of the host $HOME would drag the
+      # operator's credential directories into the container; this does not.
+      - headroom-state:/data
+
+    # The image ships its own HEALTHCHECK (curl /readyz). Repeated here so the
+    # start period matches this deployment: first start compiles/loads
+    # tokenizers and is materially slower than steady state.
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+    # NOTE: intentionally no `sablier.enable` label.
+    #
+    # Sablier scales labelled containers to zero when idle. That is correct for
+    # an interactive IDE and wrong for a proxy: the client would get
+    # ConnectionRefused on the first request after an idle period, which is the
+    # exact failure this sidecar exists to eliminate. Adding sablier.enable=true
+    # here would reintroduce it. Leave it off.
+    labels:
+      org.opencontainers.image.title: "headroom-proxy"
+      org.opencontainers.image.description: "Context optimization proxy sidecar for code-server"
+
+    security_opt:
+      - no-new-privileges:true
+
+    networks:
+      - code-server-net
+
+volumes:
+  headroom-state:
+
+networks:
+  # Attach to the network the code-server container already uses, rather than
+  # creating a second one. `external: true` means compose will not create or
+  # destroy it; it must already exist.
+  #
+  # Find yours with:
+  #   docker inspect <code-server> --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}'
+  code-server-net:
+    external: true
+    name: ${CODE_SERVER_NETWORK:-roo-dev_default}
