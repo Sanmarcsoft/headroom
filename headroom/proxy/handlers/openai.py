@@ -29,6 +29,7 @@ from headroom.proxy.helpers import (
     jitter_delay_ms,
 )
 from headroom.proxy.loopback_guard import is_loopback_host
+from headroom.proxy.ssrf import UPSTREAM_BASE_URL_HEADER, check_upstream_base_url
 from headroom.proxy.stage_timer import StageTimer, emit_stage_timings_log
 from headroom.proxy.ws_session_registry import (
     TerminationCause,
@@ -126,7 +127,10 @@ def _strip_codex_lite_metadata(raw_msg: str) -> str:
 _OPENAI_CHAT_COMPLETIONS_PATH = "/chat/completions"
 _OPENAI_RESPONSES_PATH = "/responses"
 _OPENAI_ORIGINAL_PATH_HEADER = "x-headroom-original-path"
-_OPENAI_BASE_URL_HEADER = "x-headroom-base-url"
+# Kept as a module constant for readability at the call sites below; the
+# authoritative definition, and the SSRF policy for its value, live in
+# headroom/proxy/ssrf.py.
+_OPENAI_BASE_URL_HEADER = UPSTREAM_BASE_URL_HEADER
 _decode_openai_bearer_payload = decode_openai_bearer_payload
 
 
@@ -223,6 +227,18 @@ def _resolve_openai_upstream_base(request_headers: dict[str, str]) -> str | None
     normalized = _normalize_origin(raw_base_url)
     if normalized is None:
         return None
+
+    # SSRF guard, defense in depth. The authoritative enforcement is the
+    # boundary middleware in headroom/proxy/server.py, which rejects a blocked
+    # header with a 400 before routing, so a blocked value should never reach
+    # this function. This second check keeps the handler safe if it is ever
+    # called outside that middleware (direct unit use, an embedded mount).
+    #
+    # UpstreamBaseUrlBlocked propagates rather than returning None: None means
+    # "no header supplied" and would silently fall back to the DEFAULT upstream,
+    # forwarding the caller's prompt and Authorization header to a provider they
+    # did not name. A rejection must be loud.
+    check_upstream_base_url(normalized)
 
     # _normalize_origin drops the path; re-attach it so a custom upstream served
     # from a sub-path (e.g. https://host/api/v1) is preserved rather than routed

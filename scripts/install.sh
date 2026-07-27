@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+# A mutable tag means the image that receives your mounted ~/.claude, ~/.codex
+# and ~/.gemini directories, plus the ANTHROPIC_/OPENAI_/AWS_ env passthrough,
+# can change under you without any local change. Pin by digest for anything you
+# care about:
+#   HEADROOM_DOCKER_IMAGE=ghcr.io/headroomlabs-ai/headroom@sha256:<digest>
 IMAGE_DEFAULT="ghcr.io/headroomlabs-ai/headroom:latest"
 INSTALL_IMAGE="${HEADROOM_DOCKER_IMAGE:-${IMAGE_DEFAULT}}"
 INSTALL_DIR="${HOME}/.local/bin"
@@ -143,9 +148,21 @@ append_common_container_args() {
   ref+=(--env "HEADROOM_CONFIG_DIR=${HEADROOM_CONTAINER_HOME}/.headroom/config")
   ref+=(-v "${PWD}:/workspace")
   ref+=(-v "${HEADROOM_HOST_HOME}/.headroom:${HEADROOM_CONTAINER_HOME}/.headroom")
-  ref+=(-v "${HEADROOM_HOST_HOME}/.claude:${HEADROOM_CONTAINER_HOME}/.claude")
-  ref+=(-v "${HEADROOM_HOST_HOME}/.codex:${HEADROOM_CONTAINER_HOME}/.codex")
-  ref+=(-v "${HEADROOM_HOST_HOME}/.gemini:${HEADROOM_CONTAINER_HOME}/.gemini")
+  # Agent config directories carry cached credentials and session state. They are
+  # mounted read-write because the wrapped agents genuinely write here: Claude
+  # Code persists sessions, todos and project memory under ~/.claude, and a
+  # read-only mount breaks the tool this script exists to launch.
+  #
+  # The real exposure is not the write bit, it is WHICH image gets these mounts.
+  # Pin HEADROOM_DOCKER_IMAGE to a digest to close that (see IMAGE_DEFAULT).
+  # Operators who accept losing agent state can set HEADROOM_AGENT_CONFIG_RO=1.
+  local agent_cfg_mode=""
+  if [[ -n "${HEADROOM_AGENT_CONFIG_RO:-}" ]]; then
+    agent_cfg_mode=":ro"
+  fi
+  ref+=(-v "${HEADROOM_HOST_HOME}/.claude:${HEADROOM_CONTAINER_HOME}/.claude${agent_cfg_mode}")
+  ref+=(-v "${HEADROOM_HOST_HOME}/.codex:${HEADROOM_CONTAINER_HOME}/.codex${agent_cfg_mode}")
+  ref+=(-v "${HEADROOM_HOST_HOME}/.gemini:${HEADROOM_CONTAINER_HOME}/.gemini${agent_cfg_mode}")
 
   if command -v id >/dev/null 2>&1; then
     ref+=(--user "$(id -u):$(id -g)")
@@ -205,13 +222,34 @@ wait_for_proxy() {
   return 1
 }
 
+# Host-side publish spec for the proxy port.
+#
+# A bare "-p PORT:PORT" tells Docker to bind 0.0.0.0 on the HOST, which puts the
+# proxy on every interface the machine has, LAN and coffee-shop wifi included.
+# The proxy fronts the operator's provider credentials and does not require a
+# token by default, so that bind is an unauthenticated data plane for anyone on
+# the same network. The native CLI already defaults to 127.0.0.1
+# (headroom/cli/proxy.py); this keeps the Docker path consistent with it.
+#
+# The container-internal "--host 0.0.0.0" below is correct and stays: the server
+# must listen on all interfaces INSIDE the container for the published port to
+# reach it. Only the host-side binding is narrowed here.
+#
+# Set HEADROOM_PUBLISH_HOST to widen it deliberately, e.g.
+#   HEADROOM_PUBLISH_HOST=0.0.0.0 headroom wrap claude
+publish_spec() {
+  local port="$1"
+  local host="${HEADROOM_PUBLISH_HOST:-127.0.0.1}"
+  printf '%s:%s:%s' "${host}" "${port}" "${port}"
+}
+
 start_proxy_container() {
   local port="$1"
   shift
 
   local container_name="headroom-proxy-${port}-$$"
   local args=()
-  args=(docker run -d --rm --name "${container_name}" -p "${port}:${port}")
+  args=(docker run -d --rm --name "${container_name}" -p "$(publish_spec "${port}")")
   append_common_container_args args
   args+=("${HEADROOM_IMAGE}" --host 0.0.0.0 --port "${port}" "$@")
   "${args[@]}" >/dev/null
@@ -308,9 +346,21 @@ append_persistent_container_args() {
   ref+=(--env "HEADROOM_WORKSPACE_DIR=${HEADROOM_CONTAINER_HOME}/.headroom")
   ref+=(--env "HEADROOM_CONFIG_DIR=${HEADROOM_CONTAINER_HOME}/.headroom/config")
   ref+=(-v "${HEADROOM_HOST_HOME}/.headroom:${HEADROOM_CONTAINER_HOME}/.headroom")
-  ref+=(-v "${HEADROOM_HOST_HOME}/.claude:${HEADROOM_CONTAINER_HOME}/.claude")
-  ref+=(-v "${HEADROOM_HOST_HOME}/.codex:${HEADROOM_CONTAINER_HOME}/.codex")
-  ref+=(-v "${HEADROOM_HOST_HOME}/.gemini:${HEADROOM_CONTAINER_HOME}/.gemini")
+  # Agent config directories carry cached credentials and session state. They are
+  # mounted read-write because the wrapped agents genuinely write here: Claude
+  # Code persists sessions, todos and project memory under ~/.claude, and a
+  # read-only mount breaks the tool this script exists to launch.
+  #
+  # The real exposure is not the write bit, it is WHICH image gets these mounts.
+  # Pin HEADROOM_DOCKER_IMAGE to a digest to close that (see IMAGE_DEFAULT).
+  # Operators who accept losing agent state can set HEADROOM_AGENT_CONFIG_RO=1.
+  local agent_cfg_mode=""
+  if [[ -n "${HEADROOM_AGENT_CONFIG_RO:-}" ]]; then
+    agent_cfg_mode=":ro"
+  fi
+  ref+=(-v "${HEADROOM_HOST_HOME}/.claude:${HEADROOM_CONTAINER_HOME}/.claude${agent_cfg_mode}")
+  ref+=(-v "${HEADROOM_HOST_HOME}/.codex:${HEADROOM_CONTAINER_HOME}/.codex${agent_cfg_mode}")
+  ref+=(-v "${HEADROOM_HOST_HOME}/.gemini:${HEADROOM_CONTAINER_HOME}/.gemini${agent_cfg_mode}")
 
   if command -v id >/dev/null 2>&1; then
     ref+=(--user "$(id -u):$(id -g)")
@@ -493,7 +543,10 @@ start_persistent_docker_install() {
 
   docker rm -f "${container_name}" >/dev/null 2>&1 || true
 
-  args=(docker run -d --restart unless-stopped --name "${container_name}" -p "${port}:${port}")
+  # Loopback-only by default, same reasoning as start_proxy_container. A
+  # persistent deployment is the more dangerous of the two to leave wide open,
+  # since it survives reboots and nobody is watching it start.
+  args=(docker run -d --restart unless-stopped --name "${container_name}" -p "$(publish_spec "${port}")")
   append_persistent_container_args args
   args+=(
     --env "HEADROOM_DEPLOYMENT_PROFILE=${profile}"
@@ -1240,20 +1293,37 @@ install_openclaw_plugin() {
 
   local install_output=""
   local install_status=0
+
+  # OpenClaw's --dangerously-force-unsafe-install exists to bypass OpenClaw's own
+  # safety gate on unvetted plugin sources. Passing it unconditionally means
+  # every headroom user silently opts out of a protection another project
+  # deliberately built, without ever being asked. Make it opt-in: if OpenClaw
+  # refuses the install, the operator gets a clear instruction and decides.
+  local unsafe_flag=()
+  if [[ -n "${HEADROOM_OPENCLAW_UNSAFE_INSTALL:-}" ]]; then
+    unsafe_flag=(--dangerously-force-unsafe-install)
+  fi
+
   set +e
   if [[ "${local_source_mode}" -eq 1 ]]; then
     if [[ "${copy_mode}" -eq 1 ]]; then
-      install_output="$(openclaw plugins install --dangerously-force-unsafe-install "${plugin_path}" 2>&1)"
+      install_output="$(openclaw plugins install "${unsafe_flag[@]}" "${plugin_path}" 2>&1)"
       install_status=$?
     else
-      install_output="$(cd "${plugin_path}" && openclaw plugins install --dangerously-force-unsafe-install --link . 2>&1)"
+      install_output="$(cd "${plugin_path}" && openclaw plugins install "${unsafe_flag[@]}" --link . 2>&1)"
       install_status=$?
     fi
   else
-    install_output="$(openclaw plugins install --dangerously-force-unsafe-install "${plugin_spec}" 2>&1)"
+    install_output="$(openclaw plugins install "${unsafe_flag[@]}" "${plugin_spec}" 2>&1)"
     install_status=$?
   fi
   set -e
+
+  if [[ "${install_status}" -ne 0 && ${#unsafe_flag[@]} -eq 0 ]]; then
+    if printf '%s' "${install_output}" | grep -qi "unsafe\|untrusted\|--dangerously"; then
+      warn "OpenClaw refused this plugin source as unvetted. If you trust it, re-run with HEADROOM_OPENCLAW_UNSAFE_INSTALL=1 to bypass OpenClaw's safety gate."
+    fi
+  fi
   install_output="${install_output//$'\r'/}"
 
   if [[ "${install_status}" -eq 0 ]]; then
@@ -1616,7 +1686,7 @@ EOF
       run_args=(docker run --rm)
       append_tty_args run_args
       append_common_container_args run_args
-      run_args+=(-p "${port}:${port}")
+      run_args+=(-p "$(publish_spec "${port}")")
       run_args+=(--entrypoint headroom "${HEADROOM_IMAGE}" "${args[@]}")
       "${run_args[@]}"
       ;;

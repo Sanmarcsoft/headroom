@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from fastapi import FastAPI, Request, WebSocket
+from fastapi.responses import JSONResponse
 
 from headroom.providers.cloudcode import normalize_cloudcode_passthrough_path
 from headroom.providers.codex.responses import handle_chatgpt_codex_responses_subpath
@@ -59,8 +60,26 @@ from headroom.proxy.passthrough import (
     custom_base_passthrough_telemetry as _custom_base_passthrough_telemetry,
 )
 from headroom.proxy.request_scope import normalize_request_path
+from headroom.proxy.ssrf import UpstreamBaseUrlBlocked, check_upstream_base_url
 
 logger = logging.getLogger("headroom.proxy.routes")
+
+
+def _ssrf_rejection_response(exc: UpstreamBaseUrlBlocked) -> JSONResponse:
+    """400 for a caller-supplied upstream base URL refused by SSRF policy."""
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": {
+                "type": "invalid_request_error",
+                "message": (
+                    "upstream base URL rejected by SSRF policy: "
+                    f"{exc.hostname!r} resolves to a loopback, private, "
+                    "link-local or otherwise reserved address"
+                ),
+            }
+        },
+    )
 
 
 def _register_provider_passthrough_route(
@@ -212,6 +231,12 @@ def register_provider_routes(app: FastAPI, proxy: Any) -> None:
         # OpenAI-compatible and generic passthrough routes.
         custom_base = request.headers.get("x-headroom-base-url", "").strip()
         if custom_base:
+            # Defense in depth; the boundary middleware already rejected a
+            # blocked value, so this only fires outside that middleware.
+            try:
+                check_upstream_base_url(custom_base)
+            except UpstreamBaseUrlBlocked as exc:
+                return _ssrf_rejection_response(exc)
             return await proxy.handle_anthropic_messages(
                 request, upstream_base_url=custom_base.rstrip("/")
             )
@@ -440,6 +465,13 @@ def register_provider_routes(app: FastAPI, proxy: Any) -> None:
     async def passthrough(request: Request, path: str):
         custom_base = request.headers.get("x-headroom-base-url")
         if custom_base:
+            # Defense in depth. This catch-all is the route the original SSRF
+            # bypass used: /latest/meta-data/... matches no named route, falls
+            # through here, and previously reached the metadata service.
+            try:
+                check_upstream_base_url(custom_base)
+            except UpstreamBaseUrlBlocked as exc:
+                return _ssrf_rejection_response(exc)
             base_url = custom_base.rstrip("/")
             endpoint_name, provider_name = _custom_base_passthrough_telemetry(
                 request.method,

@@ -32,8 +32,13 @@ Implementation notes:
 
 from __future__ import annotations
 
+import errno
+import logging
 import os
+import tempfile
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Canonical env var names
@@ -181,20 +186,154 @@ def config_dir() -> Path:
     return Path.home() / _WORKSPACE_DIR_DEFAULT / _CONFIG_DIR_DEFAULT_SUFFIX
 
 
-def ensure_workspace_dir() -> Path:
-    """Return :func:`workspace_dir`, creating it if it does not yet exist."""
+def ensure_private_dir(path: Path, mode: int = 0o700) -> Path:
+    """Create ``path`` (if needed) and ensure it is private (``mode``).
 
-    path = workspace_dir()
-    path.mkdir(parents=True, exist_ok=True)
+    ``Path.mkdir(mode=...)`` only applies the requested bits at *creation*
+    time, and even then only subject to the process umask -- a directory
+    that predates a hardening fix, or one some other code path created
+    without ``mode=``, keeps whatever permissive mode it already had
+    forever. This was confirmed live: ``~/.headroom`` sat at 0755
+    (world-traversable, filenames enumerable) despite
+    ``ensure_workspace_dir`` requesting 0700, because that request only
+    ever fired on first creation. Calling ``chmod`` unconditionally here
+    (new or pre-existing) self-heals that case on every call instead of
+    only protecting fresh installs.
+
+    Best-effort on platforms/filesystems that don't honor POSIX permission
+    bits (notably Windows, whose ACL model ``chmod`` only partially maps
+    onto): a failed chmod is logged, not raised, so directory creation
+    itself never fails because of this secondary hardening step.
+    """
+
+    # Record which ancestors are missing BEFORE creating them. mkdir(parents=True)
+    # applies `mode` only to the final component; every parent it creates along
+    # the way gets the umask default (commonly 0755), so a nested workspace path
+    # would end with a private leaf sitting under world-traversable parents.
+    missing: list[Path] = []
+    probe = path
+    while not probe.exists():
+        missing.append(probe)
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
+
+    path.mkdir(parents=True, exist_ok=True, mode=mode)
+    if os.name != "nt":
+        # Harden the leaf first (self-heals a pre-existing permissive dir),
+        # then every ancestor this call actually created. Directories that
+        # already existed are left alone: they are not ours to re-permission.
+        for target in [path, *missing]:
+            try:
+                target.chmod(mode)
+            except OSError as exc:
+                logger.warning("paths: failed to chmod dir %s to %o: %s", target, mode, exc)
     return path
+
+
+def ensure_workspace_dir() -> Path:
+    """Return :func:`workspace_dir`, creating it (private, 0700) if needed."""
+
+    return ensure_private_dir(workspace_dir())
 
 
 def ensure_config_dir() -> Path:
-    """Return :func:`config_dir`, creating it if it does not yet exist."""
+    """Return :func:`config_dir`, creating it (private, 0700) if needed."""
 
-    path = config_dir()
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return ensure_private_dir(config_dir())
+
+
+def touch_private_file(path: Path, mode: int = 0o600) -> None:
+    """Ensure ``path`` exists at ``mode`` before a less-careful creator does.
+
+    Closes the classic secret-file TOCTOU: a caller that does
+    ``open(path, "w")`` / ``sqlite3.connect(path)`` and *then* chmods it is
+    briefly (or, if the chmod fails, permanently) exposed at the process's
+    umask-derived default mode -- commonly 0644, world-readable. Calling
+    this first means the file already exists at ``mode`` by the time that
+    less-careful creator gets to it, so it merely opens (never creates) the
+    file and the permissive window never opens at all.
+
+    ``os.O_CREAT`` without ``os.O_EXCL`` makes this idempotent and content
+    preserving: a pre-existing file (e.g. a live sqlite ``-wal`` file, or
+    one written before this fix shipped) is opened, not truncated, and its
+    mode is then explicitly repaired -- so upgrading self-heals a
+    previously-insecure file instead of only protecting fresh ones.
+
+    Best-effort like :func:`ensure_private_dir`: a chmod failure is logged,
+    not raised, matching Headroom's fail-open posture for secondary
+    hardening -- the file still gets created either way.
+    """
+
+    # O_NOFOLLOW so this cannot be turned into a primitive for chmod-ing an
+    # attacker-chosen file. Without it, a symlink pre-planted at `path` by
+    # anyone who can write the containing directory is followed, and the
+    # helper written to CLOSE a TOCTOU opens a different one instead. The
+    # cache path is operator-configurable (HEADROOM_CCR_SQLITE_PATH), so the
+    # containing directory is not always one we hardened.
+    flags = os.O_CREAT | os.O_RDWR
+    flags |= getattr(os, "O_NOFOLLOW", 0)  # not present on Windows
+    try:
+        fd = os.open(str(path), flags, mode)
+    except OSError as exc:
+        # ELOOP means the path is a symlink. Refuse rather than follow it.
+        if getattr(exc, "errno", None) == errno.ELOOP:
+            logger.error(
+                "paths: refusing to create %s through a symlink (possible tampering)", path
+            )
+            raise
+        raise
+    try:
+        # fchmod acts on the descriptor we just opened, so it cannot be
+        # redirected between the open and the chmod the way a path-based
+        # chmod can.
+        if os.name != "nt":
+            os.fchmod(fd, mode)
+    except OSError as exc:
+        logger.warning("paths: failed to chmod %s to %o: %s", path, mode, exc)
+    finally:
+        os.close(fd)
+
+
+def atomic_write_private(path: Path, data: str, *, mode: int = 0o600) -> None:
+    """Atomically write ``data`` to ``path`` via a pre-restricted temp file.
+
+    Generalises the temp-file + ``os.replace`` pattern already proven in
+    ``settings_store._atomic_write_text`` so other secret-bearing writers
+    (e.g. ``copilot_auth.py``'s Copilot OAuth refresh token) share it
+    instead of each hand-rolling write-then-chmod-in-place, which has a
+    TOCTOU window (the file exists briefly at the umask default mode
+    before the chmod call) and a silent-failure mode (a swallowed chmod
+    exception leaves it permanently at that default mode).
+
+    ``tempfile.mkstemp`` creates its file at mode 0600 atomically as part
+    of the same syscall that creates it -- there is no separate chmod call
+    for the common case, and therefore no window, however small, where the
+    file exists on disk at a looser mode, and no failure path where a
+    chmod could silently leave secret content world/group readable.
+    ``os.replace`` preserves the temp file's mode on the destination (POSIX
+    rename does not adopt the mode of a file it overwrites), so the final
+    path is ``mode`` whether or not it previously existed at something
+    looser.
+    """
+
+    ensure_private_dir(path.parent)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        if mode != 0o600 and os.name != "nt":
+            # mkstemp always creates at 0600; only re-chmod if the caller
+            # asked for a different mode.
+            os.chmod(tmp_name, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +570,9 @@ __all__ = [
     "workspace_dir",
     "ensure_config_dir",
     "ensure_workspace_dir",
+    "ensure_private_dir",
+    "touch_private_file",
+    "atomic_write_private",
     "savings_path",
     "toin_path",
     "subscription_state_path",

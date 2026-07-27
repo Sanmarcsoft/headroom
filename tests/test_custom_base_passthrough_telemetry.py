@@ -6,12 +6,32 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from headroom.providers.proxy_routes import register_provider_routes
 from headroom.proxy.handlers.openai import OpenAIHandlerMixin
+
+
+@pytest.fixture(autouse=True)
+def _resolve_test_hosts_as_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the .example hosts in this module resolve to a public address.
+
+    The SSRF guard fails closed on a hostname that does not resolve, which is
+    correct in production but would block every fake host used here. Stubbing
+    resolution keeps these tests about their own subject rather than about DNS.
+    """
+    import socket as _socket
+
+    import headroom.proxy.ssrf as _ssrf
+
+    monkeypatch.setattr(
+        _ssrf.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
 
 
 class _Runtime:

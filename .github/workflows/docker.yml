@@ -53,6 +53,18 @@ jobs:
   # `docker-manifest` job below combines the per-arch digests into the
   # final multi-arch tagged manifest, which is what users pull by tag.
   docker-build:
+    # Publishing is opt-in, and the opt-in is deliberately absent on forks.
+    #
+    # This workflow pushes to ghcr.io/${{ github.repository }} and cosign-signs
+    # the result with the repository's own keyless Sigstore identity. On a fork
+    # that mirrors upstream, "sync" means pushing to main, so every sync
+    # published signed images of code the fork owner had never reviewed. That
+    # applies a first-party attestation to third-party work, which is the
+    # opposite of what a signature is for.
+    #
+    # Set the repository variable HEADROOM_PUBLISH_IMAGES to 'true' to enable.
+    # Leave it unset anywhere the images are not genuinely yours to vouch for.
+    if: vars.HEADROOM_PUBLISH_IMAGES == 'true'
     runs-on: ${{ matrix.arch.runs_on }}
     timeout-minutes: 75
     strategy:
@@ -72,7 +84,7 @@ jobs:
           - { name: arm64, runs_on: ubuntu-24.04-arm, platform: linux/arm64 }
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Normalize image name
         id: image-name
@@ -94,7 +106,7 @@ jobs:
 
       - name: Set up Python
         if: steps.version.outputs.version != ''
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
 
@@ -104,10 +116,10 @@ jobs:
           python scripts/version-sync.py --version ${{ steps.version.outputs.version }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -117,13 +129,13 @@ jobs:
       # multi-arch index manifest and are applied in docker-manifest.
       - name: Extract image labels
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ env.REGISTRY }}/${{ steps.image-name.outputs.image_name }}
 
       - name: Build and push by digest (single platform)
         id: bake
-        uses: docker/bake-action@v7
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7
         with:
           files: |
             ./docker-bake.hcl
@@ -202,7 +214,7 @@ jobs:
           "
 
       - name: Upload digest marker
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           # Variant + arch in the artifact name so the manifest job can
           # download with `pattern: digests-<variant>-*` to gather all
@@ -219,6 +231,10 @@ jobs:
   # into a single multi-arch index manifest, applies the metadata-action
   # tags, and that manifest is what users pull by `:tag`.
   docker-manifest:
+    # Same opt-in gate as docker-build. `needs` alone would already skip this
+    # when the build is skipped, but the guard is repeated so that removing or
+    # reordering a dependency can never silently re-enable publishing.
+    if: vars.HEADROOM_PUBLISH_IMAGES == 'true'
     needs: docker-build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -263,17 +279,17 @@ jobs:
         run: printf 'sha=%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download per-arch digests for this variant
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: digests-${{ matrix.variant.name || 'root' }}-*
           path: ${{ runner.temp }}/digests
@@ -284,7 +300,7 @@ jobs:
       # bare variant) so existing pull URLs keep working.
       - name: Extract metadata (variant)
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ env.REGISTRY }}/${{ steps.image-name.outputs.image_name }}
           tags: |
@@ -353,7 +369,7 @@ jobs:
 
       - name: Install cosign
         if: steps.manifest.outputs.index_digest != ''
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sign multi-arch index manifest with cosign
         if: steps.manifest.outputs.index_digest != ''
@@ -387,6 +403,8 @@ jobs:
     # variant manifest job has finished, so GHCR's package version
     # listing (sorted by created_at) shows the root image with :latest
     # at the top instead of whichever variant happened to finish last.
+    # Same opt-in gate as docker-build, repeated for the same reason.
+    if: vars.HEADROOM_PUBLISH_IMAGES == 'true'
     needs: docker-manifest
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -410,10 +428,10 @@ jobs:
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}

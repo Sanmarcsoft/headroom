@@ -184,3 +184,42 @@ def test_maybe_check_async_skips_when_fresh(monkeypatch):
     uc.write_cache("0.27.0")
     monkeypatch.setattr(uc, "fetch_latest_version", lambda **k: pytest.fail("should not fetch"))
     assert uc.maybe_check_async() is None
+
+
+# --------------------------------------------------------------------------- #
+# format_first_run_notice / first-run disclosure
+# --------------------------------------------------------------------------- #
+def test_format_first_run_notice_names_destination_and_opt_out():
+    notice = uc.format_first_run_notice()
+    assert uc._PYPI_JSON_URL in notice
+    assert "HEADROOM_UPDATE_CHECK=off" in notice
+
+
+def test_maybe_check_async_prints_notice_on_first_run(monkeypatch, capsys):
+    # No cache present yet -> this is the first-ever check.
+    assert uc.read_cache() is None
+    monkeypatch.setattr(uc, "fetch_latest_version", lambda **k: "0.27.0")
+
+    thread = uc.maybe_check_async()
+    assert thread is not None
+    thread.join(timeout=5)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""  # never touches stdout
+    assert uc._PYPI_JSON_URL in captured.err
+    assert "HEADROOM_UPDATE_CHECK=off" in captured.err
+
+
+def test_maybe_check_async_silent_on_later_runs(monkeypatch, capsys):
+    # A cache already exists from a prior check (now stale) -> not first run.
+    now = time.time()
+    uc.write_cache("0.26.0", now=now - uc._CHECK_TTL_SECONDS - 1)
+    monkeypatch.setattr(uc, "fetch_latest_version", lambda **k: "0.27.0")
+
+    thread = uc.maybe_check_async()
+    assert thread is not None
+    thread.join(timeout=5)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""

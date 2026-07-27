@@ -43,6 +43,25 @@ from headroom.proxy.server import ProxyConfig, create_app
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _resolve_test_hosts_as_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the .example hosts in this module resolve to a public address.
+
+    The SSRF guard fails closed on a hostname that does not resolve, which is
+    correct in production but would block every fake host used here. Stubbing
+    resolution keeps these tests about their own subject rather than about DNS.
+    """
+    import socket as _socket
+
+    import headroom.proxy.ssrf as _ssrf
+
+    monkeypatch.setattr(
+        _ssrf.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
+
+
 def test_strip_returns_new_dict_does_not_mutate_caller() -> None:
     """`_strip_internal_headers` is pure — caller's dict is untouched."""
     original = {

@@ -499,7 +499,6 @@ def save_headroom_copilot_oauth_token(
         raise ValueError("Copilot OAuth token must not be empty.")
 
     path = headroom_copilot_auth_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     body: dict[str, Any] = {
         "type": "oauth",
         "provider": "github-copilot",
@@ -507,11 +506,14 @@ def save_headroom_copilot_oauth_token(
         "domain": _github_oauth_domain(domain),
         "created_at": int(time.time()),
     }
-    path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+    # Atomic temp-file + os.replace, mirroring settings_store's proven
+    # pattern (headroom/settings_store.py::_atomic_write_text). mkstemp
+    # creates its file at 0600 as part of the same syscall that creates
+    # it, so the plaintext OAuth refresh token is never briefly (nor, on a
+    # chmod failure, permanently) world/group readable the way a
+    # write-then-chmod-in-place sequence would leave it. See
+    # ``paths.atomic_write_private`` for the shared implementation.
+    paths.atomic_write_private(path, json.dumps(body, indent=2, sort_keys=True) + "\n")
     return path
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -382,3 +384,106 @@ def test_router_lru_eviction_drops_oldest(tmp_path: Path, monkeypatch: pytest.Mo
     for i in range(5):
         router.backend_for(_ctx(headers={"x-headroom-cwd": f"/code/p{i}"}))
     assert len(router.open_backends()) == 4
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 (HIGH): the memory DB had zero permission hardening. It is the most
+# content-sensitive artifact Headroom writes (verbatim prompts/outputs across
+# every project) and the least protected. These tests hit the real
+# filesystem under ``tmp_path`` -- ``_make_router`` only stubs out
+# ``LocalBackend`` itself (avoids loading embedders), not the directory/file
+# creation in ``_get_or_create_backend``, which is what we're checking here.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_project_mode_db_file_created_at_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    router = _make_router(tmp_path, MemoryStorageMode.PROJECT, monkeypatch)
+
+    _, scope = router.backend_for(_ctx(headers={"x-headroom-cwd": "/code/proj-a"}))
+
+    assert scope.db_path.exists()
+    assert stat.S_IMODE(scope.db_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_project_mode_graph_db_sibling_created_at_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph-store sibling (``<stem>_graph<suffix>``) is just as
+    content-sensitive as the main memory DB (entities/relationships
+    extracted from the same conversations) and must be hardened too."""
+    router = _make_router(tmp_path, MemoryStorageMode.PROJECT, monkeypatch)
+
+    _, scope = router.backend_for(_ctx(headers={"x-headroom-cwd": "/code/proj-b"}))
+    graph_path = scope.db_path.with_name(f"{scope.db_path.stem}_graph{scope.db_path.suffix}")
+
+    assert graph_path.exists()
+    assert stat.S_IMODE(graph_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_project_mode_db_parent_dir_is_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    router = _make_router(tmp_path, MemoryStorageMode.PROJECT, monkeypatch)
+
+    _, scope = router.backend_for(_ctx(headers={"x-headroom-cwd": "/code/proj-c"}))
+
+    assert stat.S_IMODE(scope.db_path.parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_user_mode_db_file_created_at_0600(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    router = _make_router(tmp_path, MemoryStorageMode.USER, monkeypatch)
+
+    _, scope = router.backend_for(_ctx(base_user_id="alice"))
+
+    assert scope.db_path.exists()
+    assert stat.S_IMODE(scope.db_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_global_mode_db_file_created_at_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    router = _make_router(tmp_path, MemoryStorageMode.GLOBAL, monkeypatch)
+
+    _, scope = router.backend_for(_ctx(headers={"x-headroom-cwd": "/code/anything"}))
+
+    assert scope.db_path.exists()
+    assert stat.S_IMODE(scope.db_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_db_file_self_heals_preexisting_permissive_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A memory.db left over from before this fix (0644) must be repaired
+    the next time the router opens a backend for it."""
+    db_path = tmp_path / "memories" / "projects" / "some-key-abc123" / "memory.db"
+    db_path.parent.mkdir(parents=True)
+    db_path.touch(mode=0o644)
+    os.chmod(db_path, 0o644)
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o644
+
+    monkeypatch.setattr("headroom.memory.storage_router.LocalBackend", _FakeBackend)
+    router = BackendRouter(
+        BackendRouterConfig(
+            mode=MemoryStorageMode.PROJECT,
+            root_dir=tmp_path / "memories",
+            global_db_path=tmp_path / "memory.db",
+            backend_config_template=LocalBackendConfig(db_path=str(tmp_path / "memory.db")),
+        )
+    )
+    monkeypatch.setattr(
+        ProjectResolver,
+        "resolve",
+        lambda self, ctx: ("some-key-abc123", "some-project"),
+    )
+
+    router.backend_for(_ctx())
+
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600

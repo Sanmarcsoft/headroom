@@ -128,6 +128,27 @@ MODEL_TO_TOKENIZER: dict[str, str] = {
 _LOAD_TIMEOUT_ENV = "HEADROOM_HF_TOKENIZER_LOAD_TIMEOUT_SECS"
 _LOAD_TIMEOUT_DEFAULT = 10.0
 
+# Repo ids allowed to load with trust_remote_code=True.
+#
+# SECURITY: trust_remote_code=True makes AutoTokenizer.from_pretrained download
+# and *execute* a Python file shipped alongside the target HuggingFace repo.
+# The tokenizer name passed to _load_tokenizer is not always developer-chosen:
+# get_tokenizer_name() falls back to returning the caller-supplied `model`
+# string verbatim when it isn't in MODEL_TO_TOKENIZER (directly or via prefix
+# match), and that `model` string comes from the request body of the proxy's
+# OpenAI-compatible endpoints (headroom/proxy/token_counting.py), which any
+# caller can set. Passing trust_remote_code=True unconditionally would let a
+# request like {"model": "attacker/repo"} download and run arbitrary code on
+# the proxy host.
+#
+# This allowlist is built from MODEL_TO_TOKENIZER's own values -- the curated,
+# developer-chosen HF repo ids this module already ships -- never from
+# anything derived from request input. Everything else loads with
+# trust_remote_code=False; if that tokenizer genuinely needs custom code to
+# load, AutoTokenizer raises and the existing exception handling below fails
+# open to estimation, the same as any other load failure.
+_TRUSTED_REMOTE_CODE_REPOS: frozenset[str] = frozenset(MODEL_TO_TOKENIZER.values())
+
 
 def _load_timeout_secs() -> float:
     try:
@@ -156,10 +177,15 @@ def _load_tokenizer(tokenizer_name: str):
     """
     from transformers import AutoTokenizer
 
+    # See _TRUSTED_REMOTE_CODE_REPOS above: only a curated, developer-chosen
+    # repo id may execute remote code. tokenizer_name can otherwise be
+    # attacker-controlled request input.
+    trust_remote_code = tokenizer_name in _TRUSTED_REMOTE_CODE_REPOS
+
     try:
         return AutoTokenizer.from_pretrained(
             tokenizer_name,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             local_files_only=True,
         )
     except Exception:
@@ -181,7 +207,7 @@ def _load_tokenizer(tokenizer_name: str):
             result.append(
                 AutoTokenizer.from_pretrained(
                     tokenizer_name,
-                    trust_remote_code=True,
+                    trust_remote_code=trust_remote_code,
                 )
             )
         except BaseException as e:  # noqa: BLE001 — report any failure to the waiter

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import stat
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,6 +56,90 @@ def test_read_cached_oauth_token_prefers_headroom_login(
     copilot_auth.save_headroom_copilot_oauth_token("gho-headroom")
 
     assert copilot_auth.read_cached_oauth_token() == "gho-headroom"
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 (HIGH, TOCTOU): the saved refresh token file must never be briefly
+# (or, on a swallowed chmod failure, permanently) world/group readable.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_save_headroom_copilot_oauth_token_creates_file_at_0600(tmp_path: Path) -> None:
+    path = copilot_auth.save_headroom_copilot_oauth_token("gho-secret")
+    assert path == tmp_path / "copilot_auth.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_save_headroom_copilot_oauth_token_writes_expected_payload(tmp_path: Path) -> None:
+    path = copilot_auth.save_headroom_copilot_oauth_token("gho-secret")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["type"] == "oauth"
+    assert payload["refresh"] == "gho-secret"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_save_headroom_copilot_oauth_token_never_briefly_world_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for the TOCTOU: even a wide-open process umask must
+    not leave the token file group/world readable at any point.
+
+    An implementation that does ``path.write_text(...)`` (creates at the
+    umask-derived mode) and *then* ``path.chmod(0o600)`` has a window --
+    however small -- where the file exists on disk at the permissive mode.
+    ``tempfile.mkstemp`` creates its file at 0600 atomically as part of the
+    same syscall that creates it, so there is no such window regardless of
+    umask. We simulate the worst case (umask 0) and assert the final mode
+    is still exactly 0600.
+    """
+    old_umask = os.umask(0o000)
+    try:
+        path = copilot_auth.save_headroom_copilot_oauth_token("gho-secret")
+    finally:
+        os.umask(old_umask)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_save_headroom_copilot_oauth_token_secure_even_if_chmod_is_stubbed_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discriminates the fix from the vulnerable pattern directly.
+
+    ``write_text()`` then a separate ``chmod(0o600)`` call relies on that
+    chmod succeeding to end up secure -- stub it to a no-op and the old
+    implementation would leave the file at its umask-derived creation mode
+    (0644 under a typical 0o022 umask). The fixed implementation creates
+    the file at 0600 in the same syscall that creates it (``mkstemp``), so
+    it stays secure even with every ``chmod`` call neutered.
+    """
+    monkeypatch.setattr(os, "chmod", lambda *a, **k: None)
+    old_umask = os.umask(0o022)
+    try:
+        path = copilot_auth.save_headroom_copilot_oauth_token("gho-secret")
+    finally:
+        os.umask(old_umask)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_save_headroom_copilot_oauth_token_overwrite_stays_0600(tmp_path: Path) -> None:
+    """Re-saving (e.g. token refresh) must not regress a widened mode back
+    to a stale insecure value nor leave the file any less private."""
+    path = copilot_auth.save_headroom_copilot_oauth_token("gho-first")
+    os.chmod(path, 0o644)  # simulate a pre-fix file inherited from an old install
+
+    path = copilot_auth.save_headroom_copilot_oauth_token("gho-second")
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert json.loads(path.read_text(encoding="utf-8"))["refresh"] == "gho-second"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_save_headroom_copilot_oauth_token_parent_dir_is_private(tmp_path: Path) -> None:
+    path = copilot_auth.save_headroom_copilot_oauth_token("gho-secret")
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
 def test_default_oauth_domain_uses_enterprise_url_host(monkeypatch: pytest.MonkeyPatch) -> None:

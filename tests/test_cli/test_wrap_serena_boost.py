@@ -227,7 +227,12 @@ def test_preindex_runs_serena_in_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyP
     cmd = args[0]
     assert cmd[0] == "uvx"
     assert cmd[-3:] == ["serena", "project", "index"]
-    assert "git+https://github.com/oraios/serena" in cmd
+    # Serena is pinned to an immutable commit, so assert against the shared
+    # constant rather than the bare repo URL. A moving branch is a supply-chain
+    # hole, and hardcoding the URL here would let the two drift apart silently.
+    from headroom.mcp_registry.install import SERENA_PACKAGE_SPEC
+
+    assert SERENA_PACKAGE_SPEC in cmd
     assert kwargs["cwd"] == str(tmp_path)  # invoked in the project cwd
     assert "timeout" in kwargs  # timeout-guarded
 

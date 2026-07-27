@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 from headroom.providers.claude import DEFAULT_API_URL as DEFAULT_ANTHROPIC_API_URL
 from headroom.providers.codex import DEFAULT_API_URL as DEFAULT_OPENAI_API_URL
 from headroom.providers.gemini import DEFAULT_API_URL as DEFAULT_GEMINI_API_URL
+from headroom.proxy.ssrf import check_upstream_base_url
 
 DEFAULT_CLOUDCODE_API_URL = "https://cloudcode-pa.googleapis.com"
 DEFAULT_VERTEX_API_URL = "https://us-central1-aiplatform.googleapis.com"
@@ -80,6 +81,9 @@ class ProxyProviderRuntime:
         if headers.get("api-key"):
             azure_base = headers.get("x-headroom-base-url", "")
             if azure_base:
+                # Defense in depth; the boundary middleware in proxy/server.py
+                # is the authoritative enforcement point.
+                check_upstream_base_url(azure_base)
                 return azure_base.rstrip("/")
         return self.api_targets.openai
 

@@ -10,6 +10,7 @@ from headroom.mcp_registry.base import (
 )
 from headroom.mcp_registry.install import (
     DEFAULT_PROXY_URL,
+    SERENA_PACKAGE_SPEC,
     build_headroom_spec,
     build_serena_spec,
     install_everywhere,
@@ -90,7 +91,7 @@ def test_build_serena_spec_uses_agent_context() -> None:
     assert spec.command == "uvx"
     assert spec.args == (
         "--from",
-        "git+https://github.com/oraios/serena",
+        SERENA_PACKAGE_SPEC,
         "serena",
         "start-mcp-server",
         "--project-from-cwd",

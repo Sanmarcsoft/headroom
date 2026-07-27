@@ -15,6 +15,14 @@ from .opencode import OpencodeRegistrar
 #: Default proxy URL used when none is given.
 DEFAULT_PROXY_URL = "http://127.0.0.1:8787"
 
+#: Immutable git ref for Serena (tag v1.6.1). This is the single source of truth
+#: for the pin used by build_serena_spec() and by wrap.py:_index_serena_project().
+#: Using a commit instead of a branch or tag prevents upstream force-push or
+#: compromise from executing arbitrary code on every headroom wrap.
+SERENA_PACKAGE_SPEC = (
+    "git+https://github.com/oraios/serena@bcac0969fb8685783ea6d0f2642468fcc47e6395"
+)
+
 
 def get_all_registrars() -> list[MCPRegistrar]:
     """Return one instance of every registrar implemented today.
@@ -45,22 +53,23 @@ def build_headroom_spec(proxy_url: str = DEFAULT_PROXY_URL) -> ServerSpec:
 def build_serena_spec(context: str) -> ServerSpec:
     """Construct the canonical Serena MCP server spec for an agent context.
 
-    ``--open-web-dashboard False`` suppresses Serena's browser popup on
-    startup. Headroom installs Serena by default, so without this flag every
-    wrapped session opens the Serena dashboard tab even for users who never
-    opted into Serena or created a ``~/.serena/serena_config.yml``. The flag
-    overrides Serena's own config at startup (it sets
-    ``web_dashboard_open_on_launch=False``), so it works regardless of the
-    user's local config. The dashboard backend still runs and remains
-    reachable at http://localhost:24282/dashboard/ for anyone who wants it —
-    only the automatic browser-open is disabled.
+    Uses the immutable SERENA_PACKAGE_SPEC (a git commit) so the MCP launch
+    and the pre-index step in wrap.py can never drift. ``--open-web-dashboard
+    False`` suppresses Serena's browser popup on startup. Headroom installs
+    Serena by default, so without this flag every wrapped session opens the
+    Serena dashboard tab even for users who never opted into Serena or created
+    a ``~/.serena/serena_config.yml``. The flag overrides Serena's own config
+    at startup (it sets ``web_dashboard_open_on_launch=False``), so it works
+    regardless of the user's local config. The dashboard backend still runs
+    and remains reachable at http://localhost:24282/dashboard/ for anyone who
+    wants it; only the automatic browser-open is disabled.
     """
     return ServerSpec(
         name="serena",
         command="uvx",
         args=(
             "--from",
-            "git+https://github.com/oraios/serena",
+            SERENA_PACKAGE_SPEC,
             "serena",
             "start-mcp-server",
             "--project-from-cwd",

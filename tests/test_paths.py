@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,171 @@ def test_ensure_config_dir_creates(fake_home: Path) -> None:
     result = paths.ensure_config_dir()
     assert result.is_dir()
     assert result == fake_home / ".headroom" / "config"
+
+
+# ---------------------------------------------------------------------------
+# Directory permission hardening (FIX 4: ~/.headroom was observed at 0755 --
+# world-traversable and filename-enumerable -- because mkdir(mode=) only
+# applies at creation time and nothing ever chmod'd it afterwards).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_ensure_workspace_dir_creates_private(fake_home: Path) -> None:
+    result = paths.ensure_workspace_dir()
+    assert stat.S_IMODE(result.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_ensure_config_dir_creates_private(fake_home: Path) -> None:
+    result = paths.ensure_config_dir()
+    assert stat.S_IMODE(result.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_ensure_workspace_dir_repairs_preexisting_permissive_dir(fake_home: Path) -> None:
+    """A directory created before this fix (e.g. plain ``mkdir()``) self-heals.
+
+    ``Path.mkdir(mode=...)`` only applies the requested bits at creation
+    time, so a directory that already exists at a looser mode would
+    otherwise stay world-traversable forever even after upgrading to a
+    version of Headroom with the hardened ``ensure_workspace_dir``.
+    """
+    target = fake_home / ".headroom"
+    target.mkdir(mode=0o755)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+    result = paths.ensure_workspace_dir()
+
+    assert stat.S_IMODE(result.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_ensure_config_dir_repairs_preexisting_permissive_dir(fake_home: Path) -> None:
+    target = fake_home / ".headroom" / "config"
+    target.mkdir(mode=0o755, parents=True)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+    result = paths.ensure_config_dir()
+
+    assert stat.S_IMODE(result.stat().st_mode) == 0o700
+
+
+# ---------------------------------------------------------------------------
+# ``ensure_private_dir`` / ``touch_private_file`` / ``atomic_write_private``
+# -- shared TOCTOU-safe primitives used by secret-bearing writers
+# (copilot_auth.py, cache/backends/sqlite.py, memory/storage_router.py).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_ensure_private_dir_creates_at_mode(tmp_path: Path) -> None:
+    target = tmp_path / "nested" / "dir"
+    result = paths.ensure_private_dir(target)
+    assert result == target
+    assert target.is_dir()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_ensure_private_dir_repairs_existing_dir(tmp_path: Path) -> None:
+    target = tmp_path / "dir"
+    target.mkdir(mode=0o755)
+    paths.ensure_private_dir(target)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_touch_private_file_creates_at_mode(tmp_path: Path) -> None:
+    target = tmp_path / "secret.db"
+    assert not target.exists()
+    paths.touch_private_file(target)
+    assert target.exists()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_touch_private_file_is_idempotent_and_preserves_content(tmp_path: Path) -> None:
+    """Must not truncate an existing file -- e.g. a live sqlite -wal file."""
+    target = tmp_path / "secret.db"
+    target.write_bytes(b"already-has-content")
+    paths.touch_private_file(target)
+    assert target.read_bytes() == b"already-has-content"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_touch_private_file_repairs_existing_permissive_file(tmp_path: Path) -> None:
+    target = tmp_path / "secret.db"
+    target.touch(mode=0o644)
+    os.chmod(target, 0o644)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+    paths.touch_private_file(target)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_touch_private_file_never_briefly_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file must exist at 0600 from the very ``os.open`` that creates it.
+
+    Regression guard: an implementation that creates the file first and
+    chmods afterward reintroduces the TOCTOU window this helper exists to
+    close. We assert the mode by patching ``os.chmod`` to a no-op and
+    checking the *creation* mode (as applied by ``os.open``) is already
+    correct once umask is accounted for.
+    """
+    target = tmp_path / "secret.db"
+    old_umask = os.umask(0o022)
+    try:
+        monkeypatch.setattr(os, "chmod", lambda *a, **k: None)
+        paths.touch_private_file(target)
+    finally:
+        os.umask(old_umask)
+    # Even with the explicit chmod call stubbed out to a no-op, os.open's
+    # own mode argument (0o600) combined with umask 0o022 must already
+    # yield 0o600 (0o022 doesn't clear any bits 0o600 sets).
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_atomic_write_private_writes_content(tmp_path: Path) -> None:
+    target = tmp_path / "sub" / "secret.json"
+    paths.atomic_write_private(target, '{"refresh": "gho_xxx"}')
+    assert target.read_text(encoding="utf-8") == '{"refresh": "gho_xxx"}'
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_atomic_write_private_creates_at_0600(tmp_path: Path) -> None:
+    target = tmp_path / "secret.json"
+    paths.atomic_write_private(target, "data")
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_atomic_write_private_parent_dir_is_private(tmp_path: Path) -> None:
+    target = tmp_path / "sub" / "secret.json"
+    paths.atomic_write_private(target, "data")
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits don't apply on Windows")
+def test_atomic_write_private_overwrite_stays_0600(tmp_path: Path) -> None:
+    """Rewriting an existing secret must never leave it world-readable."""
+    target = tmp_path / "secret.json"
+    target.write_text("old", encoding="utf-8")
+    os.chmod(target, 0o644)
+
+    paths.atomic_write_private(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "new"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_atomic_write_private_no_leftover_tmp_file_on_success(tmp_path: Path) -> None:
+    paths.atomic_write_private(tmp_path / "secret.json", "data")
+    leftovers = [p for p in tmp_path.iterdir() if p.name != "secret.json"]
+    assert leftovers == []
 
 
 def test_per_resource_getters_no_mkdir(fake_home: Path) -> None:
