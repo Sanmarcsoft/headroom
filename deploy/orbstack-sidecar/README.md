@@ -20,19 +20,24 @@ This deployment gives the proxy an owner: a container with a restart policy.
 On the Docker host, with this repository checked out:
 
 ```bash
-# 1. Build an image pinned to the current commit
-./deploy/orbstack-sidecar/build.sh
+# 1. Authenticate to GHCR. The package is private; the token needs read:packages.
+docker login ghcr.io -u <github-user>
 
-# 2. Configure
+# 2. Configure. The shipped default already pins the published multi-arch digest,
+#    so usually only CODE_SERVER_NETWORK needs changing.
 cd deploy/orbstack-sidecar
 cp .env.example .env
-$EDITOR .env          # paste the HEADROOM_IMAGE printed by build.sh,
-                      # and set CODE_SERVER_NETWORK
+$EDITOR .env
 
 # 3. Run
 docker compose up -d
 docker compose ps     # wait for STATUS = healthy
 ```
+
+To iterate on an unmerged change, `./deploy/orbstack-sidecar/build.sh` builds from
+the working tree and prints a `HEADROOM_IMAGE` value to paste in place of the
+digest. That image exists only on the host that built it, so it is a development
+convenience, not a deployment: return to a published digest when finished.
 
 Then point the client at it. Inside the code-server container:
 
@@ -72,8 +77,14 @@ config across container recreation. Upstream's `headroom deploy` bind-mounts
 the host's `~/.claude`, `~/.codex` and `~/.gemini` directories into the
 container; this does not.
 
-**Image pinned to a git SHA.** Never a rolling `:latest`. A rolling tag is how
-a stale image silently lingers after a rebuild.
+**Image pinned to a digest, pulled from a registry.** Never a rolling `:latest`
+or `:main`. A rolling tag is how a stale image silently lingers after a rebuild,
+and a digest is the only reference that cannot move underneath you.
+
+Pulling rather than building locally is the other half of the same argument. A
+hand-built image exists on exactly one host: nothing else can pull it, a rebuilt
+host loses it, and the other architecture cannot run it at all. An owner for the
+process is worth little if the artifact it runs has no home.
 
 **Built from this fork, not `ghcr.io/chopratejas/headroom:latest`.** The
 upstream image lags this fork's security remediation.
