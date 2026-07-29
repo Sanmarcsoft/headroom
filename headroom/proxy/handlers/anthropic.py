@@ -2474,6 +2474,40 @@ class AnthropicHandlerMixin:
                     tools = _req_ctx.tools
                     body["tools"] = tools
 
+            # CCR tool-reference integrity — LAST word on the tools list.
+            #
+            # Every path above decides tool presence from something that does
+            # not outlive the transcript: this turn's markers, or the
+            # process-local SessionCcrTracker LRU. A conversation that already
+            # called headroom_retrieve carries that call forever, so once both
+            # of those go false (proxy restart, LRU eviction, deferred
+            # injection on a frozen prefix) Anthropic rejects the request with
+            # `400 Tool reference 'headroom_retrieve' not found in available
+            # tools` — and keeps rejecting it, because the call never leaves
+            # the history. Re-derive the requirement from the transcript, which
+            # is the only source as durable as the constraint.
+            #
+            # This runs after the deferral logic on purpose. Deferral trades a
+            # tool-list mutation for cache stability, which is the right trade
+            # right up until the alternative is a rejected turn.
+            try:
+                from headroom.ccr.tool_reference import ensure_ccr_tool_references
+
+                _ccr_tools, _ccr_repaired = ensure_ccr_tool_references(
+                    optimized_messages, body.get("tools"), provider="anthropic"
+                )
+                if _ccr_repaired:
+                    tools = _ccr_tools
+                    body["tools"] = tools
+                    logger.warning(
+                        "[%s] CCR: re-declared %s referenced by the transcript but "
+                        "missing from tools (would have been a 400)",
+                        request_id,
+                        ", ".join(_ccr_repaired),
+                    )
+            except Exception as _ccr_ref_exc:
+                logger.warning("[%s] CCR tool-reference guard FAILED: %s", request_id, _ccr_ref_exc)
+
             # Consistency: report tok_before/tok_after with ONE tokenizer. The pipeline
             # and the handler use different token estimators, and cache-mode branches
             # can leave original_tokens (handler, line ~1049) and optimized_tokens
