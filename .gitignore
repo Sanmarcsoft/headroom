@@ -25,6 +25,10 @@ scripts/*
 !scripts/release_smoke_all.py
 !scripts/verify_npm_release_assets.mjs
 !scripts/tests/
+# Fork-owned CI helpers, read by .github/workflows/fork-*.yml. Same
+# whole-subtree re-include as scripts/tests/ above. Nothing here may hold a
+# credential; the deny-by-default rule this negates exists for that reason.
+!scripts/fork/
 !scripts/README.md
 !scripts/repro_codex_replay.py
 !scripts/eval_output_shaper.py
@@ -267,3 +271,8 @@ uv.lock
 .tokensave
 
 .codebase-memory/
+
+# Claude Code per-machine settings. .claude/pre-push-gate.sh IS checked in — it
+# is the gate every developer runs — but settings.local.json holds absolute
+# paths from whichever container wrote it.
+.claude/settings.local.json

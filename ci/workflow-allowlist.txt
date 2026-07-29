@@ -1,0 +1,49 @@
+# Every file under .github/workflows/ must be listed here, with a kind.
+#
+#   fork       we wrote it, it is expected to be ACTIVE
+#   inherited  upstream's, expected to be DISABLED on this fork
+#
+# Two checks read this file. scripts/fork/check_workflow_allowlist.py fails when
+# .github/workflows/ holds a file that is not listed, which is what catches a
+# fork sync adding one. scripts/fork/check_workflow_state.py fails when the
+# server-side enabled/disabled state disagrees with the kind recorded here.
+#
+# Adding an entry is not a rubber stamp. An inherited workflow is disabled
+# because something about it should not act on this repository: it publishes, it
+# writes issues or releases, it spends API keys, or it ships this fork's source
+# to a third party. Read it before you list it. The reasons below are the ones
+# established in issue #32.
+
+# ── fork-owned ────────────────────────────────────────────────────────────────
+fork       fork-gate.yml            # lint, format, types, tests. The merge gate.
+fork       fork-security.yml        # pip-audit, CodeQL, gitleaks, zizmor.
+fork       fork-drift.yml           # allowlist, workflow state, upstream distance.
+
+# ── inherited: takes an action on the outside world ───────────────────────────
+inherited  release.yml              # contents+id-token+packages write; publishes to PyPI, npm, crates.io, and cuts GitHub releases.
+inherited  publish.yml              # publishes to PyPI and creates a GitHub release.
+inherited  docker.yml               # packages: write; pushes images to ghcr.io on every push to main.
+inherited  release-please.yml       # contents+pull-requests write; opens release PRs and tags releases on this fork.
+inherited  stale.yml                # issues+pull-requests write; would auto-close the Fork Hardening issues.
+inherited  pr-health.yml            # pull_request_target with issues+pull-requests write; applies upstream's PR governance to our PRs. Audited: checks out base.sha, not PR head, so not the classic escalation. Still upstream's rules, not ours.
+
+# ── inherited: sends data to a third party, or spends a key ───────────────────
+inherited  ci.yml                   # 18 jobs; uploads coverage to Codecov and wants HF_TOKEN. Replaced by fork-gate.yml.
+inherited  docs.yml                 # deploys to Vercel via VERCEL_TOKEN.
+inherited  eval.yml                 # scheduled; spends ANTHROPIC_API_KEY and OPENAI_API_KEY.
+inherited  network-diff-capture.yml # spends ANTHROPIC_API_KEY.
+
+# ── inherited: superseded by a fork-owned equivalent ──────────────────────────
+inherited  security.yml             # good workflow, but unpinned. fork-security.yml is the pinned derivative.
+
+# ── inherited: upstream development machinery, no value on a mirror ───────────
+inherited  changelog-guard.yml      # enforces upstream's changelog convention.
+inherited  merge-conflicts.yml      # labels conflicts against upstream's branch model.
+inherited  devcontainers.yml        # builds upstream's devcontainer images.
+inherited  rust.yml                 # nightly cron; the crates/ port has no CCR wiring on this fork.
+inherited  opencode-plugin.yml      # upstream's editor plugin.
+inherited  init-e2e.yml             # upstream CLI end-to-end matrix.
+inherited  init-native-e2e.yml      # upstream CLI end-to-end matrix.
+inherited  install-native-e2e.yml   # upstream CLI end-to-end matrix.
+inherited  wrap-e2e.yml             # upstream CLI end-to-end matrix.
+inherited  wrap-native-e2e.yml      # upstream CLI end-to-end matrix.

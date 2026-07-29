@@ -1,0 +1,102 @@
+name: Fork Drift
+
+# Drift control for a fork of a repository that ships roughly 20 commits a day.
+#
+# Three distinct kinds of drift, one job each:
+#
+#   1. File drift    — a fork sync adds a workflow file nobody here reviewed.
+#   2. State drift   — an inherited workflow gets re-enabled, by hand or by a
+#                      platform change, and upstream automation starts acting on
+#                      this repository again.
+#   3. Content drift — the fork falls far enough behind upstream that security
+#                      fixes are sitting unmerged.
+#
+# The first two are the ones with teeth. The third is an alert: a failing
+# scheduled run mails the maintainer, which is the whole mechanism. Note there
+# is no `issues: write` here — an alert that needs a write token is a worse
+# trade than an alert that arrives as a red run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily 07:00 UTC, an hour after the weekly security scan so the two do not
+    # land in the same notification batch.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-drift-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  workflow-allowlist:
+    name: No unreviewed workflow files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Compare .github/workflows against the allowlist
+        run: python3 scripts/fork/check_workflow_allowlist.py
+
+  workflow-state:
+    name: Inherited workflows stay disabled
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # read ci/workflow-allowlist.txt
+      actions: read # list workflow enabled/disabled state through the Actions API
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assert every inherited workflow is disabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: python3 scripts/fork/check_workflow_state.py
+
+  upstream-distance:
+    name: Distance from upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Measure HEAD..upstream/main
+        env:
+          # Threshold, in commits. Upstream ships ~20/day, so 200 is about ten
+          # days of drift — long enough not to nag, short enough that a security
+          # fix is not sitting unmerged for a month.
+          THRESHOLD: "200"
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/headroomlabs-ai/headroom.git
+          git fetch --quiet upstream main
+          behind="$(git rev-list --count HEAD..upstream/main)"
+          ahead="$(git rev-list --count upstream/main..HEAD)"
+          {
+            echo "### Fork distance"
+            echo ""
+            echo "| direction | commits |"
+            echo "|---|---|"
+            echo "| behind upstream/main | ${behind} |"
+            echo "| ahead of upstream/main (local patches) | ${ahead} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "behind=${behind} ahead=${ahead} threshold=${THRESHOLD}"
+          if [ "${behind}" -gt "${THRESHOLD}" ]; then
+            echo "::error::fork is ${behind} commits behind upstream/main (threshold ${THRESHOLD}); security fixes are indistinguishable from features in that stream"
+            exit 1
+          fi

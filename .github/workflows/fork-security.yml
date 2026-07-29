@@ -1,0 +1,168 @@
+name: Fork Security
+
+# The security gamut for this fork: secrets, dependencies, code, and the
+# workflows themselves.
+#
+# It is derived from the inherited security.yml, which is a good workflow — it
+# already checksum-verifies the gitleaks tarball, which was an open finding
+# (#7). Three things are different here:
+#
+#   1. Every `uses:` is SHA-pinned. The inherited file is not, and under this
+#      repo's `sha_pinning_required: true` it could not run at all.
+#   2. pip-audit runs as `uvx pip-audit`, not through pypa/gh-action-pip-audit.
+#      One less third-party action inside a job that reads the dependency graph.
+#   3. zizmor is added. Nothing in the inherited set statically analyses the
+#      workflows, which is the surface this whole exercise is about.
+#
+# Kept from the original, deliberately: the `--extra all` export excludes the
+# `benchmark` extra, whose lm-eval chain carries unpatchable upstream High CVEs
+# that are never installed in production, so the audit fails only on findings
+# somebody can act on.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays 06:00 UTC. Catches CVEs disclosed since the last commit, which is
+    # the only way a repository with no traffic still learns it is vulnerable.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-security-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  dependency-audit:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Export the production dependency set from uv.lock
+        run: |
+          uv export --frozen --no-dev --no-emit-project --no-hashes \
+            --extra all --format requirements-txt > requirements-prod.txt
+          echo "auditing $(wc -l < requirements-prod.txt) production dependencies"
+
+      - name: pip-audit
+        run: uvx pip-audit==2.10.1 --strict --requirement requirements-prod.txt
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read # read the tree CodeQL analyses
+      security-events: write # the only write any fork-owned workflow holds: SARIF upload to this repo's own security tab
+      actions: read # codeql-action reads the run's own workflow metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@4187e74d05793876e9989daffde9c3e66b4acd07 # v3.37.3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # The gitleaks binary, not gitleaks-action: the action requires a paid
+      # GITLEAKS_LICENSE on organization repos. The tarball is verified against
+      # the release's published checksums before it is unpacked, so a swapped
+      # asset fails the job instead of running as root via `sudo install`.
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          version=8.30.1
+          asset="gitleaks_${version}_linux_x64.tar.gz"
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${version}"
+
+          curl -sSfL "${base}/${asset}" -o /tmp/gitleaks.tar.gz
+          curl -sSfL "${base}/gitleaks_${version}_checksums.txt" -o /tmp/checksums.txt
+
+          expected="$(grep " ${asset}\$" /tmp/checksums.txt | awk '{print $1}')"
+          if [ -z "$expected" ]; then
+            echo "::error::no checksum entry for ${asset}" >&2
+            exit 1
+          fi
+          echo "${expected}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      # On a PR, scan only that PR's commits. Scanning full history would let a
+      # pre-existing finding block every unrelated PR, which trains people to
+      # ignore the check. Push and schedule scan the working tree.
+      - name: Scan
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            gitleaks detect --source . --log-opts="${BASE_SHA}..HEAD" --redact --no-banner
+          else
+            gitleaks detect --source . --no-git --redact --no-banner
+          fi
+
+  workflow-sast:
+    name: Workflow SAST (zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+
+      # Scoped to the fork-owned workflows. The inherited ones are all disabled
+      # and none is SHA-pinned, so auditing them here would produce a permanent
+      # wall of findings about files that cannot execute — noise that would bury
+      # a real finding in the three files that can.
+      # GH_TOKEN switches zizmor from offline to online mode. Without it the
+      # ref-version-mismatch audit cannot resolve a pinned SHA back to its tag,
+      # which is the audit that catches a pin whose version comment has drifted
+      # away from the commit it names — the exact way a pin stops being readable.
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          uvx zizmor==1.28.0 --persona=auditor --min-severity=low \
+            .github/workflows/fork-gate.yml \
+            .github/workflows/fork-security.yml \
+            .github/workflows/fork-drift.yml

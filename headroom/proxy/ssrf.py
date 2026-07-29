@@ -27,6 +27,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
+from typing import cast
 from urllib.parse import urlparse
 
 from headroom.envflags import env_flag_enabled
@@ -120,7 +121,12 @@ def is_blocked_hostname(hostname: str) -> bool:
         return True  # Resolution failed, fail closed.
     if not infos:
         return True
-    return any(is_blocked_address(info[4][0]) for info in infos)
+    # ``getaddrinfo`` returns sockaddr as ``(host, port)`` for AF_INET and
+    # ``(host, port, flowinfo, scope_id)`` for AF_INET6. mypy unions those tuple
+    # shapes, so ``info[4][0]`` widens to ``str | int``; at runtime the first
+    # element is always the address string. The cast records that rather than
+    # papering over it with ``str()``, which would silently stringify an int.
+    return any(is_blocked_address(cast(str, info[4][0])) for info in infos)
 
 
 def check_upstream_base_url(raw_base_url: str | None) -> None:

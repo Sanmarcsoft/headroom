@@ -1,0 +1,20 @@
+# Tests the gate deselects, one per line, as `<pytest node id>  # <reason>`.
+#
+# This exists because the inherited suite has failures this fork did not cause,
+# and a gate that is red on arrival gets ignored within a week. Quarantining is
+# how those stay visible instead: the gate skips them, a separate non-blocking
+# job runs them anyway so their output is in every run, and
+# scripts/fork/check_quarantine.py caps the list so it cannot quietly grow.
+#
+# Every entry needs a reason. An entry without one is unreviewable in six
+# months, and the guard rejects it.
+#
+# The list starts empty on purpose. A full local run on 2026-07-29 showed 20
+# failures, but 15 of them trace to this dev container shipping a 32-bit
+# sqlite_vec extension (`sqlite_vec/vec0.so: wrong ELF class: ELFCLASS32`),
+# which makes SQLITE_VEC_AVAILABLE false and every memory-backed test error out.
+# That is a property of one machine, not of the repository, and quarantining on
+# it would skip 15 tests that pass fine on a runner. So the first real CI run
+# produces the list, and each entry lands with the run that proved it.
+#
+# Removing an entry is always allowed and never needs a reason.
