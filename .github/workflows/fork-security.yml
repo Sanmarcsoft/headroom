@@ -61,6 +61,10 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
+          # Distinct cache key per job. Jobs sharing a key race to reserve it and
+          # the losers annotate the run with "Unable to reserve cache with key",
+          # a warning that passes the build and still shows up in the panel.
+          cache-suffix: security-pip-audit
 
       - name: Export the production dependency set from uv.lock
         run: |
@@ -215,6 +219,7 @@ jobs:
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           python-version: "3.12"
+          cache-suffix: security-zizmor # distinct key, see the pip-audit job
 
       # Scoped to the fork-owned workflows. The inherited ones are all disabled
       # and none is SHA-pinned, so auditing them here would produce a permanent

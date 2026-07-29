@@ -49,6 +49,13 @@ jobs:
         with:
           python-version: ${{ env.PY_VERSION }}
           enable-cache: true
+          # Every job that sets up uv on the same Python and lockfile derives the
+          # same cache key, so concurrent jobs race to reserve it and the losers
+          # emit "Unable to reserve cache with key ..." as a run annotation. The
+          # runs still pass, which is what makes it easy to wave through. A
+          # per-job suffix makes the keys distinct, and is more accurate anyway:
+          # these jobs do not install the same things.
+          cache-suffix: gate-static
 
       - name: ruff check
         run: scripts/fork/run-gate.sh lint
@@ -72,6 +79,7 @@ jobs:
         with:
           python-version: ${{ env.PY_VERSION }}
           enable-cache: true
+          cache-suffix: gate-test # distinct key, see the static job
 
       # `uv run` builds headroom._core through maturin, which shells out to
       # cargo. ubuntu-latest ships a toolchain, but a cold target/ directory is
@@ -122,6 +130,7 @@ jobs:
         with:
           python-version: ${{ env.PY_VERSION }}
           enable-cache: true
+          cache-suffix: gate-quarantine # distinct key, see the static job
           # When ci/quarantine.txt is empty this job runs no tests, so uv is
           # never invoked and there is no cache directory to save. Without this
           # the post-step errors with "Cache path does not exist on disk" and
