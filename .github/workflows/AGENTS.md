@@ -48,8 +48,8 @@ the alert; there is deliberately no `issues: write` anywhere in this directory.
 
 | File | What it is for |
 |---|---|
-| `fork-gate.yml` | lint, format, types, tests. The merge gate. |
-| `fork-security.yml` | pip-audit, osv-scanner, gitleaks, zizmor. |
+| `fork-gate.yml` | lint, format, types, clippy, tests. The merge gate. |
+| `fork-security.yml` | pip-audit, osv-scanner, opengrep, cargo-audit, gitleaks, zizmor. |
 | `fork-drift.yml` | allowlist, workflow state, upstream distance. |
 
 ## Rules for editing anything in here
@@ -108,14 +108,12 @@ HuggingFace model id.
 took the last `security-events: write` with it. Adding a write is a decision to
 make deliberately, in the PR, not a line to slip into a job.
 
-**There is currently no SAST on this repository's own source.** CodeQL was
-removed when the repo went private, because code scanning needs GitHub Advanced
-Security and the free plan does not have it. That was not a judgement that it
-was low value: it held 50 open alerts, 27 high and 23 medium, snapshotted in
-`ci/codeql-snapshot/`. Read that before assuming this directory covers source
-code. `zizmor` covers workflows and `gitleaks` covers secrets; neither looks at
-Python or TypeScript. Closing the gap means an OSS scanner that runs without
-Advanced Security.
+**SAST is OpenGrep, and it is measured against the CodeQL it replaced.** CodeQL
+went when the repo went private, because code scanning needs GitHub Advanced
+Security and the free plan does not have it. Its 50 alerts are snapshotted in
+`ci/codeql-snapshot/`, and the replacement was checked against that snapshot
+rather than declared equivalent. See "Source SAST" below for what it does and
+does not reproduce.
 
 **Enabling an inherited workflow requires changing its kind in
 `ci/workflow-allowlist.txt` first**, or `fork-drift.yml` fails. That is the
@@ -157,6 +155,87 @@ Every baseline entry needs a reason and `check_osv.py` errors without one. When
 a dependency moves and an entry stops being reported the script prints a
 `::notice::` rather than failing, because failing on good news is how a check
 gets ignored.
+
+## Source SAST
+
+`opengrep` 1.26.0, with `opengrep/opengrep-rules` pinned at commit
+`f1d2b562`, over `headroom/ sdk/ plugins/` (1106 files, about 90 seconds).
+
+**Why the fork of the rules and not Semgrep's.** Semgrep relicensed:
+`semgrep/semgrep-rules` is now under the proprietary "Semgrep Rules License
+v1.0". `opengrep/opengrep-rules` was taken before that and stays LGPL-2.1 plus
+the Commons Clause, which forbids *selling* a service whose value derives from
+the rules. Scanning our own private repos is not that. OpenGrep also has no
+telemetry to disable, which is one fewer thing for the egress rule to police.
+
+**Three tiers, decided by each rule's own metadata**, in
+`scripts/fork/check_opengrep.py`:
+
+| tier | count here | behaviour |
+|---|---|---|
+| `security` + `vuln` | 48 | blocks, against `ci/sast-baseline.txt` |
+| `security` + `audit` | 85 | reported in the step summary, never blocks |
+| everything else | 297 | dropped |
+
+That last row is the load-bearing one. The rule set finds 201 maintainability,
+63 best-practice and 33 correctness issues on this tree, and ruff, mypy and
+clippy already own that ground. Run the whole set unfiltered and the gate is red
+on arrival with 430 findings, 130 of them at ERROR, of which 60 are
+`useless-inner-function` firing on FastAPI handlers registered inside factories,
+which is idiomatic. A gate nobody can act on is a gate nobody reads.
+
+**Measured against CodeQL, not assumed equivalent.** It reproduces the classes
+that mattered and finds three CodeQL did not (file permissions, path traversal,
+cleartext transport). It does *not* reproduce CodeQL's 16x
+`py/incomplete-url-substring-sanitization` or 19x `py/stack-trace-exposure`;
+both land in the non-blocking audit tier. That is a real loss, written down
+here rather than papered over.
+
+**The baseline counts per rule, not per finding.** Upstream lands ~20 commits a
+day and nearly every finding is in code this fork does not own, so a baseline
+keyed on fingerprint or `file:line` would repaint itself on every sync. A
+per-rule ceiling still fails on the twelfth md5 call and survives code moving
+between files. The tradeoff, taken deliberately: deleting one finding and adding
+another under the same rule nets to zero and passes.
+
+**Scan errors are baselined too**, under `_scan-error:parse` and
+`_scan-error:timeout`. A file OpenGrep cannot parse is a file OpenGrep is not
+scanning. Two are known: `headroom/transforms/code_compressor.py` does not parse
+at all, and the flask SSRF rule times out on `headroom/cli/proxy.py`. Both are
+holes in coverage, and a third appearing has to be acknowledged in a diff
+instead of scrolling past in a log.
+
+**The rules repo is archived** (last commit 2025-01-26). Injection, crypto and
+permission patterns do not rot quickly, so this is serviceable, but it will not
+learn a new class on its own. Revisit the pin rather than trusting it.
+
+## Rust
+
+Nothing in this directory looked at the five crates until 2026-07-29. OpenGrep
+ships 334 Python and 198 JS/TS rules and **zero** for Rust, so the ~74k lines of
+Rust had no static analysis at all from either the gate or the security
+workflow.
+
+**clippy is the Rust SAST**, in `fork-gate.yml`, at `-D warnings`, blocking.
+`cargo-audit` is in `fork-security.yml`.
+
+**Neither job installs a toolchain and neither uses `dtolnay/rust-toolchain`**,
+which upstream's `rust.yml` uses and this repo's third-party allowlist forbids.
+`ubuntu-latest` ships rustup, `rust-toolchain.toml` pins channel 1.95.0 with
+rustfmt and clippy, and rustup installs exactly that on the first `cargo` call.
+The pin is why a clippy lint added in a later stable cannot turn CI red without
+a visible diff.
+
+**The commands are not written in the YAML.** The Makefile already defines
+`fmt-check` and `clippy`, and upstream's `rust.yml` runs the same two, so
+`run-gate.sh rust` calls those. A third copy is a third thing to drift.
+
+**`cargo-audit` overlaps `osv-scanner` on purpose.** Both read `Cargo.lock`
+against RustSec. `cargo audit` additionally fails on **yanked** crates, which
+OSV does not model. If this job is ever cut, yanked-crate detection goes with
+it. Its ignore list is read out of `ci/vuln-baseline.txt` rather than restated,
+so removing an entry there turns this job red, which is what keeps that file the
+actual record of what is accepted.
 
 ## Quarantine
 

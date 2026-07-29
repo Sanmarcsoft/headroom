@@ -14,7 +14,10 @@ name: Fork Security
 #   3. zizmor is added. Nothing in the inherited set statically analyses the
 #      workflows, which is the surface this whole exercise is about.
 #   4. osv-scanner is added, and it is the job that covers the most ground.
-#   5. CodeQL is absent. See the note where it used to be, above secret-scan.
+#   5. CodeQL is gone and OpenGrep stands in its place. See the note above the
+#      source-sast job for what that does and does not reproduce.
+#   6. cargo-audit is added. Nothing inherited or fork-owned looked at the Rust
+#      dependency tree for yanked crates.
 #
 # Kept from the original, deliberately: the `--extra all` export excludes the
 # `benchmark` extra, whose lm-eval chain carries unpatchable upstream High CVEs
@@ -132,18 +135,144 @@ jobs:
       - name: Compare against ci/vuln-baseline.txt
         run: python3 scripts/fork/check_osv.py /tmp/osv.json
 
-  # CodeQL was removed on 2026-07-29 when this repository became private.
+  # Replaces CodeQL, which was removed on 2026-07-29 when this repository became
+  # private: code scanning needs GitHub Advanced Security, which a private repo
+  # on the free plan does not have, so the job would have failed on every run
+  # and the SARIF upload would have been rejected. CodeQL's findings are kept in
+  # ci/codeql-snapshot/ (50 open alerts, 27 high, 23 medium) and this job was
+  # measured against them rather than against nothing. It reproduces the classes
+  # that mattered, and finds three CodeQL missed:
   #
-  # Not for cost: the two jobs were 234s of a 16 minute push, and they held the
-  # best findings in the whole setup (50 open alerts, 27 high, 23 medium). It was
-  # removed because code scanning requires GitHub Advanced Security, which a
-  # private repo on the free plan does not have, so the jobs would have failed on
-  # every run and the SARIF upload would have been rejected.
+  #   28x logger-credential-disclosure  vs  5x py/clear-text-logging
+  #   13x md5/sha1                      vs  1x py/weak-sensitive-data-hashing
+  #    3x regex_dos                     vs  4x js/polynomial-redos
+  #    2x insecure-file-permissions,  1x path-traversal,  1x cleartext-transport
   #
-  # The findings are snapshotted in ci/codeql-snapshot/ so the coverage that was
-  # lost is written down rather than forgotten. Nothing here replaces it: there is
-  # currently NO SAST on this repository's own source. The gap is real and worth
-  # closing with an OSS scanner that runs without Advanced Security.
+  # It does not reproduce everything. CodeQL's 16x incomplete-url-substring and
+  # 19x stack-trace-exposure land in the non-blocking security/audit tier here.
+  #
+  # OpenGrep, not Semgrep, because Semgrep relicensed its rules: semgrep-rules
+  # is now under the proprietary "Semgrep Rules License v1.0", while
+  # opengrep-rules is the pre-relicense fork and stays LGPL-2.1 plus the Commons
+  # Clause. The Commons Clause forbids selling a service whose value derives
+  # from the rules; scanning our own private repos is not that. OpenGrep also
+  # has no telemetry at all (there is no --metrics flag to turn off), which the
+  # egress rule in AGENTS.md wants and Semgrep would have needed handling for.
+  source-sast:
+    name: Source SAST (OpenGrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # OpenGrep publishes sigstore .cert/.sig pairs and no SHA256SUMS file, so
+      # this cannot follow the gitleaks and osv-scanner pattern of fetching the
+      # release's own checksum list. The digest is pinned here in the repository
+      # instead, which is the stronger form: a checksum file fetched from the
+      # release it describes is only as trustworthy as that release, whereas
+      # changing this line is a reviewable diff.
+      - name: Install opengrep
+        env:
+          OPENGREP_VERSION: "1.26.0"
+          OPENGREP_SHA256: "40c21299eeddabf743b856daa843d24f9d4a027130671cd45b3b21776fd9ab26"
+        run: |
+          set -euo pipefail
+          url="https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          curl -sSfL "$url" -o /tmp/opengrep
+          echo "${OPENGREP_SHA256}  /tmp/opengrep" | sha256sum -c -
+          chmod +x /tmp/opengrep
+          /tmp/opengrep --version
+
+      # Pinned to a commit, not a tag or a branch. The repository is archived
+      # (last commit 2025-01-26), so the pin is stable by circumstance as well
+      # as by intent, and a git SHA needs no separate checksum: it *is* the
+      # content hash. Archived also means these rules do not learn about new
+      # classes on their own, which is a real limitation and the reason this
+      # SHA should be revisited rather than left to rot.
+      - name: Fetch opengrep-rules at a pinned commit
+        env:
+          RULES_SHA: "f1d2b562b414783763fd02a6ed2736eaed622efa"
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none --no-checkout \
+            https://github.com/opengrep/opengrep-rules.git /tmp/rules
+          git -C /tmp/rules checkout --quiet "$RULES_SHA"
+          test "$(git -C /tmp/rules rev-parse HEAD)" = "$RULES_SHA"
+          echo "python rules:     $(find /tmp/rules/python -name '*.yaml' | wc -l)"
+          echo "javascript rules: $(find /tmp/rules/javascript -name '*.yaml' | wc -l)"
+          echo "typescript rules: $(find /tmp/rules/typescript -name '*.yaml' | wc -l)"
+
+      # The whole rule set runs and check_opengrep.py sorts the output into
+      # tiers by each rule's own metadata. Filtering by passing only the
+      # security/ directories would be faster and wrong: it would silently drop
+      # rules whose authors classified them as security without filing them
+      # there, and it would lose the audit tier the summary reports.
+      - name: Scan
+        run: |
+          set -euo pipefail
+          /tmp/opengrep scan \
+            --config /tmp/rules/python \
+            --config /tmp/rules/javascript \
+            --config /tmp/rules/typescript \
+            --no-git-ignore --json --quiet \
+            --exclude=node_modules --exclude=target --exclude=dist \
+            headroom/ sdk/ plugins/ > /tmp/opengrep.json
+          test -s /tmp/opengrep.json
+
+      - name: Compare against ci/sast-baseline.txt
+        run: python3 scripts/fork/check_opengrep.py /tmp/opengrep.json
+
+  # Cargo advisories. This overlaps the osv-scanner job above, which already
+  # reads Cargo.lock against the same RustSec data, and that overlap is
+  # deliberate rather than overlooked: `cargo audit` additionally fails on
+  # *yanked* crates, which OSV does not model at all, and it is the tool the
+  # RustSec advisories are actually written for. If this job is ever cut, note
+  # that yanked-crate detection goes with it and osv-scanner does not cover it.
+  rust-advisories:
+    name: Cargo advisories (cargo-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # rustsec/rustsec publishes no prebuilt binaries, and rustsec/audit-check
+      # is a third-party action this repo does not allow, so cargo-audit is
+      # compiled and then cached on its version. --locked builds it from its own
+      # committed lockfile, so this step does not resolve fresh dependencies of
+      # a security tool on every run.
+      - name: Cache cargo-audit
+        id: audit-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-0.22.2
+
+      - name: Install cargo-audit
+        if: steps.audit-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-audit --version 0.22.2
+
+      # Reads Cargo.lock only; it never builds this workspace. --deny yanked is
+      # the reason this job exists next to osv-scanner.
+      #
+      # The ignore list is READ FROM ci/vuln-baseline.txt rather than written
+      # here. Those three RUSTSEC ids are already accepted there, each with a
+      # reason, and a second copy of the list in this file would be a second
+      # thing to forget: dropping an entry from the baseline has to make this
+      # job go red, or the baseline stops being the record of what we accept.
+      - name: cargo audit
+        run: |
+          set -euo pipefail
+          args=()
+          while read -r id; do
+            [ -n "$id" ] || continue
+            echo "ignoring $id (accepted in ci/vuln-baseline.txt)"
+            args+=(--ignore "$id")
+          done < <(grep -oE '^RUSTSEC-[0-9]{4}-[0-9]{4}' ci/vuln-baseline.txt || true)
+          cargo audit --deny yanked "${args[@]}"
 
   secret-scan:
     name: Secret scan (gitleaks)

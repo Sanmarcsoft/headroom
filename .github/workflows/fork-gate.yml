@@ -66,6 +66,43 @@ jobs:
       - name: mypy
         run: scripts/fork/run-gate.sh types
 
+  rust:
+    name: Rust lint (fmt, clippy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No dtolnay/rust-toolchain, which is what upstream's rust.yml uses and
+      # what this repo's third-party allowlist does not permit. It is not
+      # needed: ubuntu-latest ships rustup, rust-toolchain.toml pins channel
+      # 1.95.0 with rustfmt and clippy, and rustup installs exactly that on the
+      # first cargo call. Fewer actions and the pin still holds.
+      - name: Show the toolchain rust-toolchain.toml selected
+        run: |
+          rustup show active-toolchain
+          cargo --version && cargo clippy --version
+
+      - name: Cache cargo build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('Cargo.lock', 'crates/**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # OpenGrep, this fork's SAST, ships 328 Python and 198 JS/TS rules and
+      # exactly zero for Rust. Without this job nothing looks at the 5 crates
+      # at all: not the gate, not the security workflow. clippy at
+      # `-D warnings` is the only static analysis the Rust half of this tree
+      # gets, which is why it blocks rather than reports.
+      - name: cargo fmt --check + clippy
+        run: scripts/fork/run-gate.sh rust
+
   test:
     name: Test suite
     runs-on: ubuntu-latest

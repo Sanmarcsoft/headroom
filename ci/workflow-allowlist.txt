@@ -15,8 +15,8 @@
 # established in issue #32.
 
 # ── fork-owned ────────────────────────────────────────────────────────────────
-fork       fork-gate.yml            # lint, format, types, tests. The merge gate.
-fork       fork-security.yml        # pip-audit, CodeQL, gitleaks, zizmor.
+fork       fork-gate.yml            # lint, format, types, clippy, tests. The merge gate.
+fork       fork-security.yml        # pip-audit, osv-scanner, opengrep, cargo-audit, gitleaks, zizmor.
 fork       fork-drift.yml           # allowlist, workflow state, upstream distance.
 
 # ── inherited: takes an action on the outside world ───────────────────────────

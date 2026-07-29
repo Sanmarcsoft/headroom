@@ -4,7 +4,7 @@
 # means, a local pass stops predicting a CI pass and the gate is decorative.
 # Adding a check here is the only supported way to add a check.
 #
-# Usage: scripts/fork/run-gate.sh [lint|format|types|test|quarantine|all]
+# Usage: scripts/fork/run-gate.sh [lint|format|types|rust|test|quarantine|all]
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -82,6 +82,26 @@ run_lint()   { local v; v="$(ruff_version)"; step "ruff check (${v})";        uv
 run_format() { local v; v="$(ruff_version)"; step "ruff format --check (${v})"; uvx "ruff==${v}" format --check .; }
 run_types()  { step "mypy ${MYPY_VERSION}"; uvx "mypy==${MYPY_VERSION}" headroom --ignore-missing-imports; }
 
+# The Rust half of the tree: 5 crates, ~74k lines, and until this target existed
+# no fork-owned check compiled or linted a single one of them. The commands are
+# NOT written out here. The Makefile already defines them (`fmt-check`, `clippy`)
+# and upstream's disabled rust.yml runs the same two, so this calls that
+# definition rather than adding a third copy that can drift from it.
+#
+# The toolchain is not installed here either. rust-toolchain.toml pins
+# channel 1.95.0 with rustfmt and clippy, and rustup honours that file
+# automatically on the first cargo invocation. That pin is the reason a clippy
+# lint added in a later stable cannot turn CI red without a visible diff.
+run_rust() {
+  step "cargo fmt --check + clippy (toolchain from rust-toolchain.toml)"
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo not found. Rust checks cannot run on this host; CI is the authority." >&2
+    return 1
+  fi
+  make fmt-check
+  make clippy
+}
+
 run_test() {
   step "pytest (quarantined tests deselected)"
   local args=()
@@ -104,8 +124,9 @@ case "$TARGET" in
   lint)       run_lint ;;
   format)     run_format ;;
   types)      run_types ;;
+  rust)       run_rust ;;
   test)       run_test ;;
   quarantine) run_quarantine ;;
-  all)        run_lint; run_format; run_types; run_test ;;
+  all)        run_lint; run_format; run_types; run_rust; run_test ;;
   *)          echo "unknown target: $TARGET" >&2; exit 2 ;;
 esac
