@@ -52,6 +52,32 @@ def _reset_copilot_routing_flag():
     reset_request_routed_to_copilot()
 
 
+# `_kompress_cache` is a process-global dict that a real model load populates as
+# a side effect. /readyz promotes kompress health from it (server.py
+# _reconcile_kompress_health), which is right in a live proxy — a populated cache
+# there means the model genuinely is loaded — but in a test session it lets one
+# test's real load decide another test's health payload. That is how
+# test_compression/test_universal.py (a pytorch load) turned four
+# test_proxy_health.py cases red in full-suite order while all four passed on
+# their own. Restore the entries around every test so a real load cannot leak.
+@pytest.fixture(autouse=True)
+def _isolate_kompress_model_cache():
+    # Same wrapper-CI caveat as the routing flag above: those jobs run without
+    # headroom importable, so there is no cache to isolate.
+    try:
+        from headroom.transforms.kompress_compressor import _kompress_cache
+    except ModuleNotFoundError:
+        yield
+        return
+
+    snapshot = dict(_kompress_cache)
+    yield
+    # Mutate in place rather than rebinding: server.py imports the dict object
+    # itself, so rebinding the module attribute would leave it on the old one.
+    _kompress_cache.clear()
+    _kompress_cache.update(snapshot)
+
+
 # =============================================================================
 # Global test hooks
 # =============================================================================

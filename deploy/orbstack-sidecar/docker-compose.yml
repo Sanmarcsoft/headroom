@@ -84,6 +84,41 @@ services:
     security_opt:
       - no-new-privileges:true
 
+    # The image already runs as USER nonroot and binds 8787, an unprivileged
+    # port, so it needs no capabilities at all. Dropping ALL rather than
+    # enumerating: an allowlist here would only ever list things we never use.
+    cap_drop:
+      - ALL
+
+    # Image layers become immutable; the /data named volume above stays
+    # writable, which is where all durable state already lives by design.
+    #
+    # The writable paths outside /data were found with `docker diff` on the
+    # running container rather than guessed:
+    #   /tmp                      tiktoken's data-gym-cache
+    #   /etc/ssl/certs, /etc/ca-certificates, /usr/local/share/ca-certificates
+    #                             OrbStack injecting its own root CA at start
+    #
+    # Only /tmp gets a tmpfs. The cert directories deliberately do NOT: a tmpfs
+    # there would mask the image's real CA bundle and break TLS to the upstream
+    # API, which is the opposite of hardening. OrbStack's injection simply fails
+    # closed, and the bundle baked into the image is what verifies
+    # api.anthropic.com. The upstream healthcheck is what proves this holds.
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=256m
+
+    # Ceilings, not targets. Measured on the running container before setting
+    # these: 813.6MiB RSS, 0.19% CPU, 53 PIDs at steady state. The limit is ~3.7x
+    # steady RSS so ONNX compression bursts have room; a proxy that gets
+    # OOM-killed mid-request is worse than one with no limit at all. The CPU
+    # ceiling is generous for the same reason: the compression executor runs up
+    # to 10 workers and throttling it shows up as latency on every agent call.
+    mem_limit: 3g
+    mem_reservation: 1g
+    cpus: "4.0"
+    pids_limit: 512
+
     networks:
       - code-server-net
 
