@@ -49,7 +49,7 @@ the alert; there is deliberately no `issues: write` anywhere in this directory.
 | File | What it is for |
 |---|---|
 | `fork-gate.yml` | lint, format, types, tests. The merge gate. |
-| `fork-security.yml` | pip-audit, CodeQL, gitleaks, zizmor. |
+| `fork-security.yml` | pip-audit, osv-scanner, CodeQL, gitleaks, zizmor. |
 | `fork-drift.yml` | allowlist, workflow state, upstream distance. |
 
 ## Rules for editing anything in here
@@ -112,6 +112,41 @@ change needs another write, that is a decision to make deliberately, in the PR.
 point: the file records intent, the API check enforces it, and the two can only
 diverge through a reviewed diff. Read the workflow before you promote it. Each
 one is disabled for a reason recorded next to its entry.
+
+## Dependency advisories
+
+Two checks, deliberately different in scope.
+
+**pip-audit** is zero-tolerance over one export: `uv export --no-dev --extra all`,
+620 packages, the set that actually ships. It blocks on anything.
+
+**osv-scanner** reads all six lockfiles instead (1839 packages: `uv.lock`,
+`Cargo.lock`, and four `package-lock.json`), and compares against
+`ci/vuln-baseline.txt`. Anything not in the baseline fails the job.
+
+The reason for two is a reconciliation on 2026-07-29: pip-audit reported zero
+vulnerabilities while GitHub held 22 open Dependabot alerts. Both numbers were
+correct. Every one of the 22 sat outside the production export, in an opt-in
+extra or in an npm lockfile nothing here was reading. A green pip-audit had
+been quietly meaning less than it looked like it meant.
+
+It also turned up gaps neither tool had: **Dependabot on this repo scans npm and
+pip only**, so `Cargo.lock` had no coverage anywhere, and it holds three RUSTSEC
+advisories.
+
+**Fix it before you baseline it.** The same scan showed the `[tool.uv]`
+constraint floor was `gitpython>=3.1.50`, which is the exact version all nine of
+its High advisories are filed against. Raising it to `>=3.1.55` took one line
+and removed nine findings. Baselining them would have been the easier and worse
+answer. The counter-example is in the same commit: constraining `json-repair` to
+its fixed version forced a 403-line re-resolution that downgraded `tomli` and
+pulled in `textual` and `pendulum`, so it is baselined with that measurement
+written down. Try the upgrade, measure the blast radius, then decide.
+
+Every baseline entry needs a reason and `check_osv.py` errors without one. When
+a dependency moves and an entry stops being reported the script prints a
+`::notice::` rather than failing, because failing on good news is how a check
+gets ignored.
 
 ## Quarantine
 

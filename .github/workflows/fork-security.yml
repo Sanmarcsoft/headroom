@@ -13,11 +13,21 @@ name: Fork Security
 #      One less third-party action inside a job that reads the dependency graph.
 #   3. zizmor is added. Nothing in the inherited set statically analyses the
 #      workflows, which is the surface this whole exercise is about.
+#   4. osv-scanner is added, and it is the job that covers the most ground.
 #
 # Kept from the original, deliberately: the `--extra all` export excludes the
 # `benchmark` extra, whose lm-eval chain carries unpatchable upstream High CVEs
 # that are never installed in production, so the audit fails only on findings
 # somebody can act on.
+#
+# Why both pip-audit and osv-scanner. pip-audit answers "is the thing we ship
+# to production clean", over one export of 620 packages. It reported zero while
+# GitHub held 22 open Dependabot alerts, and both were right: all 22 sat outside
+# that export, in opt-in extras or in npm lockfiles. osv-scanner answers the
+# wider question, over all six lockfiles (1839 packages) and every ecosystem in
+# the tree, cargo included, which Dependabot here does not scan at all. Keeping
+# the narrow blocking check and the wide baselined one is the point: production
+# stays at zero-tolerance, everything else stays visible.
 
 on:
   push:
@@ -60,6 +70,62 @@ jobs:
 
       - name: pip-audit
         run: uvx pip-audit==2.10.1 --strict --requirement requirements-prod.txt
+
+  lockfile-audit:
+    name: Lockfile audit (osv-scanner)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The binary rather than google/osv-scanner-action, which is not on this
+      # repo's third-party allowlist. Verified against the release's published
+      # SHA256SUMS before it is made executable, same shape as gitleaks below.
+      - name: Install osv-scanner
+        run: |
+          set -euo pipefail
+          version=2.4.0
+          asset="osv-scanner_linux_amd64"
+          base="https://github.com/google/osv-scanner/releases/download/v${version}"
+
+          curl -sSfL "${base}/${asset}" -o /tmp/osv-scanner
+          curl -sSfL "${base}/osv-scanner_SHA256SUMS" -o /tmp/osv-sums.txt
+
+          expected="$(grep " ${asset}\$" /tmp/osv-sums.txt | awk '{print $1}')"
+          if [ -z "$expected" ]; then
+            echo "::error::no checksum entry for ${asset}" >&2
+            exit 1
+          fi
+          echo "${expected}  /tmp/osv-scanner" | sha256sum -c -
+
+          chmod +x /tmp/osv-scanner
+          /tmp/osv-scanner --version
+
+      # Every lockfile the repository ships, named explicitly. A bare directory
+      # scan would silently start or stop covering a file as the tree moves;
+      # check_workflow_allowlist.py exists for the same reason. Note cargo:
+      # Dependabot on this repo watches npm and pip only, so Cargo.lock had no
+      # coverage anywhere until this job.
+      - name: Scan every lockfile
+        run: |
+          set -euo pipefail
+          args=()
+          for f in uv.lock Cargo.lock docs/package-lock.json \
+                   plugins/openclaw/package-lock.json \
+                   plugins/opencode/package-lock.json \
+                   sdk/typescript/package-lock.json; do
+            test -f "$f" || { echo "::error::expected lockfile $f is missing" >&2; exit 1; }
+            args+=(--lockfile "$f")
+          done
+          # Exit 1 just means "found something". The baseline decides whether
+          # that is a failure, so the scanner's own status is not the gate.
+          /tmp/osv-scanner scan source "${args[@]}" --format json > /tmp/osv.json || true
+          test -s /tmp/osv.json
+
+      - name: Compare against ci/vuln-baseline.txt
+        run: python3 scripts/fork/check_osv.py /tmp/osv.json
 
   codeql:
     name: CodeQL (${{ matrix.language }})
