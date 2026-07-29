@@ -18,10 +18,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 QUARANTINE = REPO_ROOT / "ci" / "quarantine.txt"
 
-# Set from the measured pre-existing failure count on the clean tree at the time
-# the gate was introduced (2026-07-29). It may go down. It goes up only with a
-# deliberate edit to this line.
-CEILING = 20
+# The suite is green in CI with nothing quarantined (run 30455809107,
+# 2026-07-29: 9886 passed, 0 failed). So the honest ceiling is low: this is
+# headroom for a genuine flake, not a budget to spend. It may go down. It goes
+# up only with a deliberate edit to this line, which is the point.
+CEILING = 5
 
 NODE_ID = re.compile(r"^[\w./-]+\.py(::[\w\[\]-]+)+$")
 

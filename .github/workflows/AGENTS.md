@@ -64,6 +64,28 @@ pins `python_version = "3.10"`; resolving mypy inside the project environment
 pulls the numpy stubs bound to the runtime interpreter and reports errors that
 do not exist. This cost a session on 2026-07-28.
 
+**The gate provisions every tool it runs; it never inherits one.** `ruff` runs
+as `uvx ruff==<pin>` with the pin read from `scripts/verify-ruff-version.py`,
+the repo's existing reader that upstream's `ci.yml` uses for the same purpose.
+`pytest` runs as `uv run --frozen --extra dev`, because pytest, respx,
+sqlite-vec and sentence-transformers all live in that extra. The first CI run
+of this gate died on `Failed to spawn: ruff` and `Failed to spawn: pytest`: a
+fresh checkout installs only the 58 base packages, and the machine the gate was
+written on already had the rest. It had passed locally for a reason unrelated
+to the code.
+
+**The suite runs on the host's CPython. Do not pin it to a uv-managed one.**
+`UV_PYTHON_PREFERENCE=system` is set deliberately. The managed build is
+tempting because it carries its own `Python.h`, which the `dev` extra needs to
+compile hnswlib. It also ships its own OpenSSL and starts with an *empty* trust
+store, and `tests/test_ssl_context.py` asserts the opposite: that headroom
+keeps the system CAs (`cert_store_stats()["x509_ca"] > 1`). Under the managed
+interpreter two tests fail for reasons that have nothing to do with headroom.
+A gate must not change the semantics of what it measures to make itself easier
+to run. The consequence is that a host without the matching `python3-dev`
+cannot build hnswlib and so cannot run the `test` target at all; that is a
+property of the host, and CI is the authority.
+
 **Pin every `uses:` to a full SHA with a trailing version comment**, and keep the
 comment true. `sha_pinning_required` rejects an unpinned action outright; zizmor's
 `ref-version-mismatch` audit catches a comment that has drifted from the commit
@@ -102,9 +124,18 @@ script. Raising it is a diff, in a PR, with a reason. A separate non-blocking jo
 runs the quarantined tests anyway, so an entry that starts passing shows up in
 the run output instead of living there forever.
 
-Measure on a runner, not locally, before adding an entry. This dev container
-ships a 32-bit `sqlite_vec/vec0.so`, which makes `SQLITE_VEC_AVAILABLE` false and
-errors out every memory-backed test. That is a property of one machine.
+**The list is currently empty and the suite is green** (run 30455809107,
+2026-07-29: 9886 passed, 576 skipped, 0 failed). The ceiling is 5, which is
+headroom for a genuine flake, not a budget to spend.
+
+**Measure on a runner, not locally, before adding an entry.** A local run the
+same day showed 8 failures and every one of them passes in CI: three
+opentelemetry tracing tests, four proxy-health tests that fail only on suite
+ordering, and one that shells out to a `cargo` this container lacks.
+Quarantining on that measurement would have skipped 8 healthy tests. This
+container also ships a 32-bit `sqlite_vec/vec0.so` (an upstream packaging bug
+in sqlite-vec 0.1.6's aarch64 wheel), which makes `SQLITE_VEC_AVAILABLE` false
+and errors out every memory-backed test. All properties of one machine.
 
 ## Related
 

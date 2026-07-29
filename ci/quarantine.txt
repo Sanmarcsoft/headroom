@@ -9,12 +9,17 @@
 # Every entry needs a reason. An entry without one is unreviewable in six
 # months, and the guard rejects it.
 #
-# The list starts empty on purpose. A full local run on 2026-07-29 showed 20
-# failures, but 15 of them trace to this dev container shipping a 32-bit
-# sqlite_vec extension (`sqlite_vec/vec0.so: wrong ELF class: ELFCLASS32`),
-# which makes SQLITE_VEC_AVAILABLE false and every memory-backed test error out.
-# That is a property of one machine, not of the repository, and quarantining on
-# it would skip 15 tests that pass fine on a runner. So the first real CI run
-# produces the list, and each entry lands with the run that proved it.
+# The list is empty because the suite is green, and that was measured on a
+# runner rather than assumed. Run 30455809107 on 2026-07-29: 2 failed, then
+# 9886 passed / 576 skipped / 0 failed once the gate stopped forcing a
+# uv-managed interpreter. Nothing is being skipped.
+#
+# It stayed empty through a deliberate near-miss worth recording. A full local
+# run the same day showed 8 failures, and every one of them passes in CI:
+# three opentelemetry tracing tests, four proxy-health tests that fail only on
+# suite ordering, and one that shells out to a cargo this container does not
+# have. Quarantining on that local measurement would have skipped 8 healthy
+# tests forever. Measure on a runner, and let each entry land with the run that
+# proved it.
 #
 # Removing an entry is always allowed and never needs a reason.
