@@ -26,7 +26,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -73,7 +73,12 @@ def resolve_and_validate(hostname: str) -> str:
     if not infos:
         raise UpstreamBaseUrlBlocked(hostname, reason="resolution_empty")
 
-    addresses = [info[4][0] for info in infos]
+    # ``getaddrinfo`` returns sockaddr as ``(host, port)`` for AF_INET and
+    # ``(host, port, flowinfo, scope_id)`` for AF_INET6. mypy unions those tuple
+    # shapes, so ``info[4][0]`` widens to ``str | int``; at runtime the first
+    # element is always the address string. The cast records that rather than
+    # papering over it with ``str()``, which would silently stringify an int.
+    addresses = [cast(str, info[4][0]) for info in infos]
     for address in addresses:
         if is_blocked_address(address):
             logger.warning(

@@ -1,0 +1,54 @@
+# Dependency advisories that have been looked at and are not being fixed here.
+#
+# scripts/fork/check_osv.py fails on any advisory NOT in this file. The point is
+# that the inherited backlog stays visible without making the job permanently
+# red, while a newly disclosed CVE turns into a red build on the PR that would
+# ship it.
+#
+# Every line needs a reason. An entry with no reason is a hard error, because a
+# baseline nobody can audit is just a mute button.
+#
+# Remove an entry the moment the dependency is upgraded; the script prints a
+# ::notice:: when a baselined advisory stops being reported.
+#
+# Measured 2026-07-29 across all six lockfiles (1839 packages): uv.lock,
+# Cargo.lock, docs/, plugins/openclaw/, plugins/opencode/, sdk/typescript/.
+# The last three are clean.
+#
+# NOT baselined, fixed instead: 9 High GitPython advisories. The
+# [tool.uv] constraint floor was gitpython>=3.1.50, the exact version all 9 are
+# filed against. Raised to >=3.1.55, which resolves to 3.1.57.
+
+# --- Cargo.lock -------------------------------------------------------------
+# Dependabot on this repo scans npm and pip only, so nothing was watching cargo
+# at all. These three are why the scan reads lockfiles rather than an export.
+RUSTSEC-2024-0436  # paste 1.0.15 unmaintained, no fix published. Proc-macro, compile-time only, no runtime surface.
+RUSTSEC-2025-0119  # number_prefix 0.4.0 unmaintained, no fix published. Formats byte counts for progress bars.
+RUSTSEC-2026-0204  # crossbeam-epoch 0.9.18, fixed in 0.9.20. Transitive and upstream-owned; needs a Cargo.lock bump upstream. Reachable only through the Debug/Pointer impl.
+
+# --- docs/package-lock.json -------------------------------------------------
+# The docs site. docs.yml (Vercel deploy) is disabled in ci/workflow-allowlist.txt,
+# so this fork neither builds nor serves it, and none of these run anywhere. All
+# have fixes, but regenerating an upstream-owned lockfile guarantees a conflict on
+# every fork sync, which costs more than it buys while the site is not deployed.
+# If docs.yml is ever promoted to `fork` kind, these stop being acceptable.
+GHSA-4633-3j49-mh5q  # next 16.2.10, fix 16.2.11. Cache confusion on request bodies. Docs site not deployed from this fork.
+GHSA-4c39-4ccg-62r3  # next 16.2.10, fix 16.2.11. Unbounded Server Action payload, Edge runtime. Docs site not deployed from this fork.
+GHSA-68g3-v927-f742  # next 16.2.10, fix 16.2.11. Cache confusion on request bodies. Docs site not deployed from this fork.
+GHSA-6gpp-xcg3-4w24  # next 16.2.10, fix 16.2.11. Middleware bypass, App Router on Turbopack. Docs site not deployed from this fork.
+GHSA-89xv-2m56-2m9x  # next 16.2.10, fix 16.2.11. SSRF in Server Actions on custom servers. Docs site not deployed from this fork.
+GHSA-955p-x3mx-jcvp  # next 16.2.10, fix 16.2.11. Discloses internal Server Function endpoints. Docs site not deployed from this fork.
+GHSA-m99w-x7hq-7vfj  # next 16.2.10, fix 16.2.11. DoS in App Router Server Actions. Docs site not deployed from this fork.
+GHSA-p9j2-gv94-2wf4  # next 16.2.10, fix 16.2.11. SSRF via rewrites with attacker-controlled destination. Docs site not deployed from this fork.
+GHSA-q8wf-6r8g-63ch  # next 16.2.10, fix 16.2.11. DoS in the Image Optimization API via SVG. Docs site not deployed from this fork.
+GHSA-f88m-g3jw-g9cj  # sharp 0.34.5, fix 0.35.0. Inherited libvips CVEs. Build-time image processing for the undeployed docs site.
+GHSA-mh99-v99m-4gvg  # brace-expansion 5.0.7, fix 5.0.8. DoS via unbounded expansion. Transitive dev dependency of the undeployed docs site.
+
+# --- uv.lock ----------------------------------------------------------------
+# Both packages arrive through opt-in extras that `--extra all` does not
+# include, which is exactly why pip-audit reported a clean production set. They
+# are still published extras a user can install, so they are recorded, not
+# ignored.
+GHSA-f4j7-r4q5-qw2c  # chromadb 1.1.1, pre-auth code injection (Critical). NO FIX PUBLISHED: affected through 1.5.9, the current release. Transitive via the crewai extra, absent from --extra all. Nothing to upgrade to; revisit when ChromaDB ships a fix.
+PYSEC-2026-311  # Same defect as GHSA-f4j7-r4q5-qw2c under its PYSEC id. See above.
+GHSA-xf7x-x43h-rpqh  # json-repair 0.25.2, fix 0.60.1. Unbounded CPU DoS on circular JSON Schema $ref. Transitive via the crewai extra, absent from --extra all. Constraining it to >=0.60.1 was tried and forced a 403-line re-resolution that downgraded tomli and pulled in textual and pendulum; not worth it for a DoS in an opt-in extra. Revisit when the lock moves for another reason.

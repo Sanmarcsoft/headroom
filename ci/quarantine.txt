@@ -1,0 +1,25 @@
+# Tests the gate deselects, one per line, as `<pytest node id>  # <reason>`.
+#
+# This exists because the inherited suite has failures this fork did not cause,
+# and a gate that is red on arrival gets ignored within a week. Quarantining is
+# how those stay visible instead: the gate skips them, a separate non-blocking
+# job runs them anyway so their output is in every run, and
+# scripts/fork/check_quarantine.py caps the list so it cannot quietly grow.
+#
+# Every entry needs a reason. An entry without one is unreviewable in six
+# months, and the guard rejects it.
+#
+# The list is empty because the suite is green, and that was measured on a
+# runner rather than assumed. Run 30455809107 on 2026-07-29: 2 failed, then
+# 9886 passed / 576 skipped / 0 failed once the gate stopped forcing a
+# uv-managed interpreter. Nothing is being skipped.
+#
+# It stayed empty through a deliberate near-miss worth recording. A full local
+# run the same day showed 8 failures, and every one of them passes in CI:
+# three opentelemetry tracing tests, four proxy-health tests that fail only on
+# suite ordering, and one that shells out to a cargo this container does not
+# have. Quarantining on that local measurement would have skipped 8 healthy
+# tests forever. Measure on a runner, and let each entry land with the run that
+# proved it.
+#
+# Removing an entry is always allowed and never needs a reason.

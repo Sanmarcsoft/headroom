@@ -1,0 +1,70 @@
+# Accepted OpenGrep findings, one line per rule, checked by
+# scripts/fork/check_opengrep.py.
+#
+#   <rule id>  <allowed count>   # why this is acceptable here
+#
+# Only the security/vuln tier reaches this file. security/audit is reported and
+# never blocks, and the maintainability, correctness and best-practice tiers are
+# dropped before they get here: ruff, mypy and clippy already own that ground.
+#
+# The count is a ceiling. Going over it fails the job, so a twelfth md5 call is
+# a red build even though eleven are listed. Going under prints a notice asking
+# you to lower the number, and never fails.
+#
+# Raising a count is a decision, made in a PR, with the reason edited to match.
+# "Fix it before you baseline it" applies here exactly as it does to
+# ci/vuln-baseline.txt, with one fork-specific caveat: every finding below is in
+# code this fork does not own, and upstream lands roughly 20 commits a day.
+# Editing 13 upstream files to silence a hash lint buys a permanent merge
+# conflict on every sync, which is a worse trade than writing the measurement
+# down. Fixes to inherited code belong in a PR to headroomlabs-ai/headroom.
+#
+# Measured 2026-07-29 against opengrep 1.26.0 with opengrep-rules pinned at
+# f1d2b562b414783763fd02a6ed2736eaed622efa, over headroom/ sdk/ plugins/
+# (1106 files). Baseline established at 48 findings, which is the same order as
+# the 50 open alerts CodeQL held before it was removed (ci/codeql-snapshot/).
+
+# ── False positives, sampled and confirmed ───────────────────────────────────
+# The rule fires on logger calls in files that merely have credential-shaped
+# identifiers in scope. Sampled 5 of the 28, including all the ones in
+# copilot_auth.py: they log exit codes, exception text, file paths and a
+# rejected API URL. None logs a secret. Worth a full read once, then this
+# entry should shrink rather than be trusted forever.
+python-logger-credential-disclosure  28  # logs exit codes, exception text, paths and URLs; sampled 5 of 28, no secret values
+
+# os.chmod(dir, 0o700) is owner-only, which is the outcome the rule exists to
+# get you to. It is written to catch 0o777 and does not check the mode it found.
+insecure-file-permissions  2  # both are os.chmod(..., 0o700), the restrictive setting the rule wants
+
+# A fetch to http://127.0.0.1:8787 inside transport.test.ts, against the test
+# server the same file starts. Loopback plaintext in a test is not a finding.
+react-insecure-request  1  # loopback http in plugins/opencode/src/transport.test.ts, not a transport path
+
+# ── Real patterns, non-security uses ─────────────────────────────────────────
+# Every hit is a truncated digest used as a cache key or content fingerprint,
+# never to authenticate or store anything. 9 of the 11 md5 sites already carry
+# an upstream `# nosec B324` annotation, so this was reviewed once before it
+# reached us. The clean fix is hashlib.md5(..., usedforsecurity=False), which is
+# an upstream change across 13 files.
+insecure-hash-algorithm-md5   11  # truncated cache keys and content fingerprints; 9 of 11 already marked `# nosec B324` upstream
+insecure-hash-algorithm-sha1   2  # sha1(dir)[:8] as a workspace id, sha1(text) as a cache key; neither is a security decision
+
+# path.join over caller-supplied config path segments in the SDK. The rule wants
+# to see the result constrained to a base directory. Not reachable from remote
+# input today, but this is the entry most likely to become real, so it is listed
+# on its own rather than folded into a group.
+path-join-resolve-traversal  1  # sdk/typescript/src/paths.ts joins local config segments; no remote input path reaches it today
+
+# NOT dismissed. Both remaining patterns nest a quantifier inside a quantifier
+# ((?:[^/\s:]+/)+ and (?:\[[0-9;]*m\])+$), which is the shape that backtracks,
+# and lossless_compaction runs over proxied log content the operator does not
+# author. Rated LOW confidence by the rule and left at 3 so it cannot grow while
+# it is being looked at. Tracked for a real review, not accepted as fine.
+regex_dos  3  # nested quantifiers; lossless_compaction.py:369 sees proxied content and needs a real review
+
+# ── Coverage this scan does not have ─────────────────────────────────────────
+# A file that will not parse is a file that is not scanned, and a rule that
+# times out is a check that silently did not run. Both are counted so a second
+# one has to be acknowledged in a diff instead of appearing in the log.
+_scan-error:parse    1  # headroom/transforms/code_compressor.py fails OpenGrep's parser ("Failure: int_of_string"); it is unscanned
+_scan-error:timeout  1  # the flask ssrf-requests rule times out on headroom/cli/proxy.py, so SSRF coverage there is incomplete
