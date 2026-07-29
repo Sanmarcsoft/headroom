@@ -41,14 +41,23 @@ ruff_version() { python3 scripts/verify-ruff-version.py --print-version; }
 # the code. Provisioning explicitly is what makes a local pass mean anything.
 UV_TEST_EXTRAS=(--extra dev)
 
-# Pin the interpreter to a uv-managed CPython rather than whatever python3.12
-# the host happens to ship. The `dev` extra pulls hnswlib, which has no wheel
-# and compiles against Python.h; a distro python without its -dev package fails
-# the build outright, which is how "works on the runner, not on my machine"
-# starts. uv-managed builds carry their own headers, so local and CI compile
-# against the identical interpreter.
-export UV_MANAGED_PYTHON=1
+# Use the host's CPython, NOT a uv-managed standalone build.
+#
+# The managed build was tried and reverted. It is attractive because it carries
+# its own Python.h, which the `dev` extra needs to compile hnswlib. But
+# python-build-standalone ships its own OpenSSL and starts with an EMPTY trust
+# store, and tests/test_ssl_context.py asserts the opposite: that headroom's TLS
+# path keeps the system CAs (`cert_store_stats()["x509_ca"] > 1`). Under the
+# managed interpreter that count is 0, and two tests fail for a reason that has
+# nothing to do with headroom's code.
+#
+# A gate must not change the semantics of what it measures to make itself
+# easier to run. The distro interpreter is what headroom actually runs on, so
+# that is what the suite runs on. Hosts without the matching python3-dev
+# package cannot build hnswlib and therefore cannot run the `test` target
+# locally; that is a property of the host, and CI is the authority.
 export UV_PYTHON="${UV_PYTHON:-3.12}"
+export UV_PYTHON_PREFERENCE="${UV_PYTHON_PREFERENCE:-system}"
 
 step() { printf '\n\033[1m── %s\033[0m\n' "$1"; }
 
