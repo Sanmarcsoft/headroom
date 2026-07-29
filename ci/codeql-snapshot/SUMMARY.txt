@@ -1,0 +1,16 @@
+# CodeQL findings, snapshot taken 2026-07-29 before the job was removed.
+#
+# Code scanning needs GitHub Advanced Security, which a private repo on the free
+# plan does not have, so these stop being reachable once headroom goes private.
+# Kept here so the coverage that was lost is at least written down.
+# 50 open alerts.
+
+high      16x  py/incomplete-url-substring-sanitization
+high       5x  py/clear-text-logging-sensitive-data
+high       4x  js/polynomial-redos
+high       1x  py/jinja2/autoescape-false
+high       1x  py/weak-sensitive-data-hashing
+medium    19x  py/stack-trace-exposure
+medium     2x  js/indirect-command-line-injection
+medium     1x  py/log-injection
+medium     1x  js/shell-command-injection-from-environment

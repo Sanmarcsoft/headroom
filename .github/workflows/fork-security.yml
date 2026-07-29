@@ -14,6 +14,7 @@ name: Fork Security
 #   3. zizmor is added. Nothing in the inherited set statically analyses the
 #      workflows, which is the surface this whole exercise is about.
 #   4. osv-scanner is added, and it is the job that covers the most ground.
+#   5. CodeQL is absent. See the note where it used to be, above secret-scan.
 #
 # Kept from the original, deliberately: the `--extra all` export excludes the
 # `benchmark` extra, whose lm-eval chain carries unpatchable upstream High CVEs
@@ -131,33 +132,18 @@ jobs:
       - name: Compare against ci/vuln-baseline.txt
         run: python3 scripts/fork/check_osv.py /tmp/osv.json
 
-  codeql:
-    name: CodeQL (${{ matrix.language }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read # read the tree CodeQL analyses
-      security-events: write # the only write any fork-owned workflow holds: SARIF upload to this repo's own security tab
-      actions: read # codeql-action reads the run's own workflow metadata
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [python, javascript-typescript]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
-        with:
-          languages: ${{ matrix.language }}
-          queries: security-extended
-
-      - name: Analyze
-        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
-        with:
-          category: "/language:${{ matrix.language }}"
+  # CodeQL was removed on 2026-07-29 when this repository became private.
+  #
+  # Not for cost: the two jobs were 234s of a 16 minute push, and they held the
+  # best findings in the whole setup (50 open alerts, 27 high, 23 medium). It was
+  # removed because code scanning requires GitHub Advanced Security, which a
+  # private repo on the free plan does not have, so the jobs would have failed on
+  # every run and the SARIF upload would have been rejected.
+  #
+  # The findings are snapshotted in ci/codeql-snapshot/ so the coverage that was
+  # lost is written down rather than forgotten. Nothing here replaces it: there is
+  # currently NO SAST on this repository's own source. The gap is real and worth
+  # closing with an OSS scanner that runs without Advanced Security.
 
   secret-scan:
     name: Secret scan (gitleaks)

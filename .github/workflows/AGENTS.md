@@ -49,7 +49,7 @@ the alert; there is deliberately no `issues: write` anywhere in this directory.
 | File | What it is for |
 |---|---|
 | `fork-gate.yml` | lint, format, types, tests. The merge gate. |
-| `fork-security.yml` | pip-audit, osv-scanner, CodeQL, gitleaks, zizmor. |
+| `fork-security.yml` | pip-audit, osv-scanner, gitleaks, zizmor. |
 | `fork-drift.yml` | allowlist, workflow state, upstream distance. |
 
 ## Rules for editing anything in here
@@ -103,9 +103,19 @@ that phone home. The EU data-sovereignty SOP covers CI egress too. The only
 outbound fetches are PyPI, crates.io, and one unauthenticated read of a public
 HuggingFace model id.
 
-**`security-events: write` on the CodeQL job is the only write permission in
-this directory.** It uploads SARIF to this repository's own security tab. If a
-change needs another write, that is a decision to make deliberately, in the PR.
+**No fork-owned workflow holds any write permission.** Every one is
+`contents: read`. This became true on 2026-07-29 when CodeQL was removed and
+took the last `security-events: write` with it. Adding a write is a decision to
+make deliberately, in the PR, not a line to slip into a job.
+
+**There is currently no SAST on this repository's own source.** CodeQL was
+removed when the repo went private, because code scanning needs GitHub Advanced
+Security and the free plan does not have it. That was not a judgement that it
+was low value: it held 50 open alerts, 27 high and 23 medium, snapshotted in
+`ci/codeql-snapshot/`. Read that before assuming this directory covers source
+code. `zizmor` covers workflows and `gitleaks` covers secrets; neither looks at
+Python or TypeScript. Closing the gap means an OSS scanner that runs without
+Advanced Security.
 
 **Enabling an inherited workflow requires changing its kind in
 `ci/workflow-allowlist.txt` first**, or `fork-drift.yml` fails. That is the
