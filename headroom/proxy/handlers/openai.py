@@ -3615,6 +3615,30 @@ class OpenAIHandlerMixin:
             if _th_ctx.tools is not _th_tools_before:
                 tools = _th_ctx.tools
                 body["tools"] = tools
+
+            # CCR tool-reference integrity — LAST word on the tools list.
+            # See headroom/ccr/tool_reference.py: marker-driven and
+            # session-sticky injection both decide from state that does not
+            # outlive the transcript, so a continued turn can reference
+            # headroom_retrieve with no declaration and take a hard 400.
+            try:
+                from headroom.ccr.tool_reference import ensure_ccr_tool_references
+
+                _ccr_tools, _ccr_repaired = ensure_ccr_tool_references(
+                    body.get("messages"), body.get("tools"), provider="openai"
+                )
+                if _ccr_repaired:
+                    tools = _ccr_tools
+                    body["tools"] = tools
+                    logger.warning(
+                        "[%s] CCR: re-declared %s referenced by the transcript but "
+                        "missing from tools (would have been a 400)",
+                        request_id,
+                        ", ".join(_ccr_repaired),
+                    )
+            except Exception as _ccr_ref_exc:
+                logger.warning("[%s] CCR tool-reference guard FAILED: %s", request_id, _ccr_ref_exc)
+
             # Recount messages after the hook (it may fold in place), preserving the
             # tool-schema delta already folded into the headline above and keeping the
             # scale consistent with original_tokens (both provider tokenizer).
@@ -4872,11 +4896,38 @@ class OpenAIHandlerMixin:
                     )
             except Exception as e:
                 logger.warning(f"[{request_id}] Memory injection failed (responses): {e}")
+
         elif self.memory_handler and memory_user_id and _bypass:
             logger.info(
                 "[%s] Responses memory passthrough reason=bypass_header",
                 request_id,
             )
+
+        # CCR tool-reference integrity for the Responses path. Items live in
+        # body["input"], and a function_call item naming headroom_retrieve is
+        # just as fatal here as a tool_use block is on Anthropic. Runs outside
+        # the memory branch so it applies to every Responses request, not only
+        # the ones that reached memory-tool injection.
+        # See headroom/ccr/tool_reference.py.
+        try:
+            from headroom.ccr.tool_reference import ensure_ccr_tool_references
+
+            _ccr_tools, _ccr_repaired = ensure_ccr_tool_references(
+                body.get("input"),
+                body.get("tools"),
+                provider="openai_responses",
+            )
+            if _ccr_repaired:
+                body["tools"] = _ccr_tools
+                body_mutation_tracker.mark_mutated("responses_ccr_tool_reference")
+                logger.warning(
+                    "[%s] CCR: re-declared %s referenced by the transcript but "
+                    "missing from tools (would have been a 400)",
+                    request_id,
+                    ", ".join(_ccr_repaired),
+                )
+        except Exception as _ccr_ref_exc:
+            logger.warning("[%s] CCR tool-reference guard FAILED: %s", request_id, _ccr_ref_exc)
 
         # /v1/responses is OpenAI-specific (Codex) — always routes direct.
         # LiteLLM/AnyLLM backends use /v1/chat/completions or /v1/messages.
