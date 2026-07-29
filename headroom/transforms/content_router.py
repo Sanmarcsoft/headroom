@@ -81,6 +81,7 @@ from .error_detection import content_has_strong_error_indicators
 from .lossless_provider import get_lossless_provider
 from .mixed_content import ContentSection, mixed_content_indicators
 from .relevance_split import build_relevance_query, plan_relevance_split
+from .verbatim_guard import classify_verbatim
 
 logger = logging.getLogger(__name__)
 
@@ -3390,6 +3391,42 @@ class ContentRouter(Transform):
 
         # Use the cleaned (tag-free) text for compression
         text_to_compress = cleaned if protected else content
+
+        # ── VERBATIM GUARD ────────────────────────────────────────────────────
+        # Kompress drops function words. On prose that is a readable summary; on
+        # source code it drops KEYWORDS (`if config.exclude_tools:` came back as
+        # `config.exclude_tools:`) and on doctrine it drops `Never`, inverting
+        # the rule. Either way the caller edits from corrupted content and
+        # nothing in the transcript says it was altered.
+        #
+        # This sits at the ML boundary for the same reason the size gate below
+        # does: every kompress entry point funnels here, including the fallbacks
+        # (CODE_AWARE->KOMPRESS, SMART_CRUSHER->KOMPRESS, TEXT, and the
+        # no-savings retry). Gating at strategy dispatch instead would leave
+        # those fallbacks open AND would wrongly block the structure-aware
+        # compressors — CODE_AWARE and SmartCrusher exist precisely to shrink
+        # code and JSON safely, so diverting them buys nothing and costs ratio.
+        #
+        # It judges ``text_to_compress``, after tag protection, because that is
+        # what the model would actually see. Custom tags are already shielded by
+        # protect_tags/restore_tags, which is the better mechanism: it keeps the
+        # tagged block byte-exact while still compressing the prose around it.
+        # Classifying the raw content instead would blanket-protect that prose
+        # and bypass the ccr_original forwarding below.
+        #
+        # Classification is by CONTENT, not by tool. Tool identity is the wrong
+        # axis because Bash is polymorphic — its pytest output should compress
+        # hard, its `sed -n '1,200p' server.py` output must not reach kompress
+        # at all. Keying on the payload gets both right; keying on the tool name
+        # would either blanket-protect logs or leave every shell-read file bare.
+        verbatim_reason = classify_verbatim(text_to_compress)
+        if verbatim_reason is not None:
+            logger.debug(
+                "verbatim guard: %s kept out of kompress (~%d tok)",
+                verbatim_reason.value,
+                len(content) // 4,
+            )
+            return content, _estimate_tokens(content)
         compressed: str | None = None
         compressed_tokens: int | None = None
 
