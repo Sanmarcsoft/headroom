@@ -18,6 +18,38 @@ QUARANTINE_FILE="ci/quarantine.txt"
 # a debugging session on 2026-07-28. Do not "simplify" it back.
 MYPY_VERSION="1.20.2"
 
+# ruff's version is NOT hardcoded here. pyproject pins it in the `dev` extra and
+# scripts/verify-ruff-version.py is the repo's existing reader for that pin;
+# upstream's ci.yml uses the same script. A second copy of the number here is a
+# second thing to forget.
+ruff_version() { python3 scripts/verify-ruff-version.py --print-version; }
+
+# Every tool runs from a provisioned environment, never from whatever the
+# working copy happens to have lying around.
+#
+#   lint/format/types -> uvx, pinned. They need no project dependencies, so the
+#                        static job stays fast and independent of the ~600
+#                        package install.
+#   test              -> `uv run --extra dev`, because pytest, respx,
+#                        sqlite-vec and sentence-transformers all live in the
+#                        `dev` extra.
+#
+# This is not a style preference. The first CI run of this gate failed with
+# `Failed to spawn: ruff` and `Failed to spawn: pytest`: a fresh checkout
+# installs only the 58 base packages, while the machine it was written on
+# already had the dev extra. The gate passed locally for a reason unrelated to
+# the code. Provisioning explicitly is what makes a local pass mean anything.
+UV_TEST_EXTRAS=(--extra dev)
+
+# Pin the interpreter to a uv-managed CPython rather than whatever python3.12
+# the host happens to ship. The `dev` extra pulls hnswlib, which has no wheel
+# and compiles against Python.h; a distro python without its -dev package fails
+# the build outright, which is how "works on the runner, not on my machine"
+# starts. uv-managed builds carry their own headers, so local and CI compile
+# against the identical interpreter.
+export UV_MANAGED_PYTHON=1
+export UV_PYTHON="${UV_PYTHON:-3.12}"
+
 step() { printf '\n\033[1m── %s\033[0m\n' "$1"; }
 
 # Reads ci/quarantine.txt and echoes one --deselect argument per live entry.
@@ -37,8 +69,8 @@ quarantine_ids() {
   sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//' "$QUARANTINE_FILE" | grep -v '^$' || true
 }
 
-run_lint()   { step "ruff check";        uv run --frozen ruff check .; }
-run_format() { step "ruff format --check"; uv run --frozen ruff format --check .; }
+run_lint()   { local v; v="$(ruff_version)"; step "ruff check (${v})";        uvx "ruff==${v}" check .; }
+run_format() { local v; v="$(ruff_version)"; step "ruff format --check (${v})"; uvx "ruff==${v}" format --check .; }
 run_types()  { step "mypy ${MYPY_VERSION}"; uvx "mypy==${MYPY_VERSION}" headroom --ignore-missing-imports; }
 
 run_test() {
@@ -46,7 +78,7 @@ run_test() {
   local args=()
   while IFS= read -r a; do args+=("$a"); done < <(quarantine_args)
   echo "quarantined: $(( ${#args[@]} / 2 )) test ids"
-  uv run --frozen pytest "${args[@]}" --tb=short -q
+  uv run --frozen "${UV_TEST_EXTRAS[@]}" pytest "${args[@]}" --tb=short -q
 }
 
 # Non-blocking. Runs exactly what the gate skipped, so the debt stays visible
@@ -56,7 +88,7 @@ run_quarantine() {
   local ids=()
   while IFS= read -r a; do ids+=("$a"); done < <(quarantine_ids)
   if [ ${#ids[@]} -eq 0 ]; then echo "quarantine is empty"; return 0; fi
-  uv run --frozen pytest "${ids[@]}" --tb=short -q || true
+  uv run --frozen "${UV_TEST_EXTRAS[@]}" pytest "${ids[@]}" --tb=short -q || true
 }
 
 case "$TARGET" in
