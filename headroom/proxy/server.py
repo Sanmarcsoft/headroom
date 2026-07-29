@@ -923,13 +923,24 @@ class HeadroomProxy(
         # and emit search results grouped by file (path once per file
         # instead of repeated on every match line).
         if is_token_mode(config.mode):
-            router_config.protect_recent_reads_fraction = 0.3
+            # Read protection is NOT age-eroded here. The router default is 0.0,
+            # commented "protect ALL excluded-tool outputs (safest for coding
+            # agents)", and a 0.3 window silently un-protected ~70% of
+            # Read/Glob/Grep results — so a file read early in a session came
+            # back lossily compressed later, after the agent had already decided
+            # it was safe to rely on. The tokens that window reclaimed are not
+            # worth handing an agent a corrupted view of its own source.
+            #
+            # Grouping search results by file stays: it is a byte-lossless
+            # reshaping (path emitted once per file instead of per match line),
+            # so it costs no fidelity.
             router_config.search_group_by_file = True
-        # Note: protect_tool_results runs AFTER token mode (ordering matters).
-        # It resets protect_recent_reads_fraction from 0.3→0.0, restoring
-        # full protection for ALL excluded-tool results regardless of age.
-        # This means naming any tool with --protect-tool-results also
-        # protects Read/Glob/Grep/Write/Edit results indefinitely.
+        # protect_tool_results pins full protection for ALL excluded-tool
+        # results regardless of age, so naming any tool with
+        # --protect-tool-results also protects Read/Glob/Grep/Write/Edit results
+        # indefinitely. This now restates the default rather than overriding a
+        # token-mode window, and is kept explicit so the guarantee survives any
+        # future change to the router default.
         if config.protect_tool_results:
             router_config.protect_recent_reads_fraction = 0.0
         # `--compress-user-messages` flips the router's default skip rule.

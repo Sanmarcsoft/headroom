@@ -224,3 +224,28 @@ def test_bash_not_in_default_exclude_tools() -> None:
     is the opt-in path."""
     assert "Bash" not in DEFAULT_EXCLUDE_TOOLS
     assert "bash" not in DEFAULT_EXCLUDE_TOOLS
+
+
+def test_token_mode_alone_does_not_erode_read_protection() -> None:
+    """Token mode must not age-erode the protected set.
+
+    Previously token mode set protect_recent_reads_fraction to 0.3, silently
+    un-protecting roughly 70% of Read/Glob/Grep results: a file read early in a
+    session came back lossily compressed later, after the agent had already
+    relied on it. Full protection was only restored if the operator happened to
+    pass --protect-tool-results. The router default is 0.0, documented as
+    "protect ALL excluded-tool outputs (safest for coding agents)", and token
+    mode now leaves that default alone.
+    """
+    proxy = _build(mode="token")
+    assert _router(proxy).config.protect_recent_reads_fraction == 0.0
+
+
+def test_token_mode_still_groups_search_results_by_file() -> None:
+    """Removing the age window must not remove the byte-lossless win alongside it.
+
+    search_group_by_file emits each path once per file instead of once per match
+    line. That is a reshaping, not a drop, so it costs no fidelity and stays on.
+    """
+    proxy = _build(mode="token")
+    assert _router(proxy).config.search_group_by_file is True
