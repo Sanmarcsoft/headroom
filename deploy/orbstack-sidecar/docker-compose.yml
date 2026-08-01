@@ -69,6 +69,13 @@ services:
       HEADROOM_WORKSPACE_DIR: /data/.headroom
       HEADROOM_CONFIG_DIR: /data/.headroom/config
       PYTHONUNBUFFERED: "1"
+      # Bearer token for /v1/*. The proxy binds 0.0.0.0 on a shared docker network,
+      # so without this every container on that network can reach Anthropic through it.
+      # The proxy says so itself on boot:
+      #   Security: WARNING non-loopback bind with NO token -- /v1/* is UNAUTHENTICATED
+      # Required rather than defaulted on purpose: a deploy that forgets it should
+      # fail at compose time instead of coming up quietly open.
+      HEADROOM_PROXY_TOKEN: ${HEADROOM_PROXY_TOKEN:?set HEADROOM_PROXY_TOKEN in .env}
 
     volumes:
       # Named volume so cache, memory and config survive `docker compose down`
