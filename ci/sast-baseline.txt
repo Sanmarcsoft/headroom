@@ -66,5 +66,5 @@ regex_dos  3  # nested quantifiers; lossless_compaction.py:369 sees proxied cont
 # A file that will not parse is a file that is not scanned, and a rule that
 # times out is a check that silently did not run. Both are counted so a second
 # one has to be acknowledged in a diff instead of appearing in the log.
-_scan-error:parse    1  # headroom/transforms/code_compressor.py fails OpenGrep's parser ("Failure: int_of_string"); it is unscanned
-_scan-error:timeout  1  # the flask ssrf-requests rule times out on headroom/cli/proxy.py, so SSRF coverage there is incomplete
+_scan-error:parse    1  # headroom/transforms/code_compressor.py: OpenGrep's own parser raises "Failure: int_of_string" and reports it at line 1, which is the docstring, so the position is a fallback and not a clue. The file is valid Python 3.10 with no hex, long-integer or exponent literals. 1.26.0 is the latest release, so there is no upgrade that clears it. Upstream bug; the file stays unscanned
+_scan-error:timeout  0  # was 1, the flask ssrf-requests rule could not finish on headroom/cli/proxy.py inside OpenGrep's 5s default. Fixed by --timeout 60 on the scan, so the file that forwards caller-controlled URLs now gets its SSRF rules. Held at 0 rather than deleted: a timeout coming back is a regression, not a new acknowledgement
