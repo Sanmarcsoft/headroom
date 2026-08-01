@@ -35,13 +35,29 @@ services:
     # Bind inside the container to 0.0.0.0 so sibling containers can connect.
     # This is safe precisely because the port is never published: the only
     # reachable interface is the user-defined bridge.
+    # `cache`, not `token`, and this default is load-bearing.
+    #
+    # token mode rewrites prior turns to squeeze the prompt. A rewritten prefix
+    # cannot be read from the provider's prefix cache, so every request re-sends
+    # the whole conversation. Coding agents count those tokens when deciding to
+    # compact their context, so they compact on context they cannot reclaim,
+    # then compact again a few messages later.
+    #
+    # Measured on a development box on 2026-08-01: one agent session took 27
+    # context compactions in 26 hours, 16 of them firing above 200k tokens
+    # against a ~167k trigger, worst 575,581. Two further sessions on the same
+    # host were caught by the same thing.
+    #
+    # token mode bought about 1.5% compression. The prefix-cache hits it
+    # destroyed are worth roughly eighty times that. cache is also Headroom's
+    # own default; this deployment had been overriding it to its own cost.
     command:
       - "--host"
       - "0.0.0.0"
       - "--port"
       - "8787"
       - "--mode"
-      - "${HEADROOM_MODE:-token}"
+      - "${HEADROOM_MODE:-cache}"
       - "--backend"
       - "${HEADROOM_BACKEND:-anthropic}"
 
