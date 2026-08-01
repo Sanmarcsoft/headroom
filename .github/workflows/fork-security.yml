@@ -209,6 +209,19 @@ jobs:
       # security/ directories would be faster and wrong: it would silently drop
       # rules whose authors classified them as security without filing them
       # there, and it would lose the audit tier the summary reports.
+      # --timeout is the per-rule, per-file budget and OpenGrep defaults it to 5
+      # seconds. That default was costing real coverage: the flask
+      # ssrf-requests rule could not finish on headroom/cli/proxy.py, so the one
+      # file in this tree that actually forwards caller-controlled URLs was the
+      # one file with incomplete SSRF analysis. A scanner that quietly skips the
+      # proxy is worse than no scanner, because the report still comes back
+      # green.
+      #
+      # 60s is chosen to be far past the cliff rather than just over it, so the
+      # rule does not start failing again the next time proxy.py grows. The job
+      # still has timeout-minutes: 20 above as the real ceiling, and
+      # --timeout-threshold is left at its default so a file that times out on
+      # several rules is still abandoned rather than pinning the runner.
       - name: Scan
         run: |
           set -euo pipefail
@@ -217,6 +230,7 @@ jobs:
             --config /tmp/rules/javascript \
             --config /tmp/rules/typescript \
             --no-git-ignore --json --quiet \
+            --timeout 60 \
             --exclude=node_modules --exclude=target --exclude=dist \
             headroom/ sdk/ plugins/ > /tmp/opengrep.json
           test -s /tmp/opengrep.json

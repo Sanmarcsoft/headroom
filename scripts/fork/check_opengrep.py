@@ -184,10 +184,23 @@ def main() -> int:
                 f"Lower it in {BASELINE.name}."
             )
 
+    # Say what actually went wrong, not just which of two buckets it fell into.
+    # Everything that is not a Timeout used to be reported as "could not be
+    # parsed", which is a guess: an out-of-memory kill and a genuine syntax
+    # failure produced the same sentence. That cost real time on
+    # code_compressor.py, where the useful detail turned out to be OpenGrep's
+    # own OCaml exception ("Failure: int_of_string") and not anything about our
+    # source at all. Carry the type and the tool's message through so the next
+    # person can act on the annotation instead of re-deriving it.
     for err in errors:
         kind = "timed out" if err.get("type") == "Timeout" else "could not be parsed"
         path = err.get("path", "?")
-        print(f"::warning file={path}::{path} {kind}; it is not fully covered by this scan.")
+        detail = err.get("long_msg") or err.get("message") or err.get("type") or ""
+        detail = " ".join(str(detail).split())
+        suffix = f" ({detail})" if detail else ""
+        print(
+            f"::warning file={path}::{path} {kind}{suffix}; it is not fully covered by this scan."
+        )
 
     if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary_path, "a") as handle:
