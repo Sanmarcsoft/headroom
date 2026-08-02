@@ -3224,11 +3224,19 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         )
 
     def _extract_proxy_token(headers) -> str | None:
+        # Check the dedicated proxy-token header first. It cannot collide with
+        # an upstream credential: OAuth-based clients (e.g. Claude Code) always
+        # populate Authorization with their own access token for the provider,
+        # which is never the proxy's shared secret. Falling back to Authorization
+        # only when this header is absent preserves the original bearer-token
+        # convenience for callers with no other way to pass the proxy token.
+        raw = headers.get("x-headroom-proxy-token")
+        if raw:
+            return str(raw)
         auth = str(headers.get("authorization") or "")
         if auth.lower().startswith("bearer "):
             return auth[7:].strip() or None
-        raw = headers.get("x-headroom-proxy-token")
-        return str(raw) if raw else None
+        return None
 
     @app.middleware("http")
     async def _security_gate(request, call_next):
