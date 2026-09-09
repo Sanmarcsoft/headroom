@@ -60,6 +60,21 @@ services:
       - "${HEADROOM_MODE:-cache}"
       - "--backend"
       - "${HEADROOM_BACKEND:-anthropic}"
+      # Prompt rewriting OFF (2026-08-12). Headroom re-compressed the
+      # conversation mid-turn, collapsing the provider prefix cache to the
+      # ~4k system-prompt boundary and re-sending 70-120k tokens uncached.
+      # Claude Code sums input+cache_creation+cache_read for its autocompact
+      # decision, so a 160k conversation reported 320-490k and compacted
+      # early, forever. Compression was worth 1.6% ($3.70 of $228); the cache
+      # it destroyed is worth ~$1,120. See dev-environment ISA headroom-thrash-rca.
+      - "--no-optimize"
+      # Persistent memory ON (2026-08-14). Injection mode is MemoryMode.AUTO_TAIL
+      # (renamed from live_zone_tail upstream; still the default as of 0.37.0):
+      # retrieval is appended to the live-zone tail and the cache hot zone is
+      # never mutated -- invariant I2, unlike --optimize, which is what caused
+      # the 2026-08-12 compaction thrash. Storage defaults to per-project DBs
+      # under /data/.headroom, inside the persistent volume.
+      - "--memory"
 
     environment:
       # Canonical Headroom filesystem contract (upstream issue #175). HOME must
@@ -67,6 +82,12 @@ services:
       # volume and loses it on container recreation.
       HOME: /data
       HEADROOM_WORKSPACE_DIR: /data/.headroom
+      # Memory state must live on the NAMED volume. The image declares
+      # VOLUME /home/nonroot/.headroom, and the memory DB defaults to
+      # {cwd}/.headroom/memory.db with WORKDIR=/home/nonroot -- so without
+      # this the DB lands on an ANONYMOUS volume that `down` + `up`
+      # orphans, silently discarding everything agents saved.
+      HEADROOM_MEMORY_DB_PATH: /data/.headroom/memory.db
       HEADROOM_CONFIG_DIR: /data/.headroom/config
       PYTHONUNBUFFERED: "1"
       # Bearer token for /v1/*. The proxy binds 0.0.0.0 on a shared docker network,
