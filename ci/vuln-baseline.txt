@@ -53,13 +53,23 @@ GHSA-w5vr-8v7q-w6rv  # baseline-browser-mapping 2.10.16, fix 2.11.0. Process ter
 GHSA-866g-f22w-33x8  # @ai-sdk/provider-utils 4.0.23, fix 4.0.33. Unbounded resource consumption, LOW. Fixed rather than baselined in sdk/typescript, where the same advisory landed on 4.0.21; recorded here only because this lockfile is the one left alone.
 
 # --- uv.lock ----------------------------------------------------------------
-# Both packages arrive through opt-in extras that `--extra all` does not
-# include, which is exactly why pip-audit reported a clean production set. They
-# are still published extras a user can install, so they are recorded, not
-# ignored.
-GHSA-f4j7-r4q5-qw2c  # chromadb 1.1.1, pre-auth code injection (Critical). NO FIX PUBLISHED: affected through 1.5.9, the current release. Transitive via the crewai extra, absent from --extra all. Nothing to upgrade to; revisit when ChromaDB ships a fix.
-PYSEC-2026-311  # Same defect as GHSA-f4j7-r4q5-qw2c under its PYSEC id. See above.
-GHSA-xf7x-x43h-rpqh  # json-repair 0.25.2, fix 0.60.1. Unbounded CPU DoS on circular JSON Schema $ref. Transitive via the crewai extra, absent from --extra all. Constraining it to >=0.60.1 was tried and forced a 403-line re-resolution that downgraded tomli and pulled in textual and pendulum; not worth it for a DoS in an opt-in extra. Revisit when the lock moves for another reason.
+# Six entries lived here until 2026-09-09: three chromadb advisories, the f4j7
+# CRITICAL pre-auth code injection under both its GHSA and PYSEC ids, and a
+# json-repair DoS. All six arrived through the `crewai` extra and none of them
+# had a reachable fix, because crewai pins `chromadb~=1.1.0` at every published
+# release through 1.15.20.
+#
+# They are gone because the extra is gone, not because they were forgiven. This
+# fork does not use crewai: nothing under headroom/ imports chromadb, it is not
+# a direct dependency, and the deployed image installs none of it. But `uv lock`
+# resolves every declared extra, so the whole subtree sat in the lock being
+# rescanned and re-triaged on every sync for an integration nobody here runs.
+# Removing the extra dropped 27 packages from the lock and left the `--extra
+# all` production export byte-identical at 621 packages.
+#
+# headroom/integrations/crewai/ is still there and still guards its own import,
+# so `pip install headroom-ai crewai` works for anyone who wants it. See
+# tests/test_fork_dropped_extras.py, which fails if a sync re-adds the extra.
 
 # accelerate, via the `voice-train` extra. Confirmed absent from the
 # `--extra all` production export on 2026-09-09 (`uv export --no-dev
@@ -75,6 +85,3 @@ GHSA-4j2p-28q2-5m79  # accelerate 1.12.0, path traversal and DoS via sharded che
 # crewai to upgrade *to* that would let chromadb move. Still an opt-in extra,
 # absent from `--extra all`, which is why pip-audit stays green over the
 # production export.
-GHSA-36p7-vc44-83pf  # chromadb 1.1.1, fix 1.5.9. CRITICAL code injection. Unreachable fix: crewai pins chromadb~=1.1.0 at every published version. Opt-in crewai extra, absent from --extra all.
-GHSA-2wm9-hf6c-p5cr  # chromadb 1.1.1, fix 1.5.9. Any authenticated user can read, write, update or delete across tenants. Same unreachable fix and same opt-in extra as above.
-GHSA-xph7-9rjv-w5fr  # chromadb 1.1.1, fix 1.5.9. SimpleRBACAuthorizationProvider does not check which tenant or database the caller is acting on. Same unreachable fix and same opt-in extra as above.
