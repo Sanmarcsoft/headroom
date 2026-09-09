@@ -204,6 +204,14 @@ jobs:
           echo "javascript rules: $(find /tmp/rules/javascript -name '*.yaml' | wc -l)"
           echo "typescript rules: $(find /tmp/rules/typescript -name '*.yaml' | wc -l)"
 
+      # `_dist` joins the exclude list for the same reason `dist` is already
+      # there: headroom/providers/opencode/_dist/entry.opencode.js is a 464 KB
+      # esbuild bundle of third-party libraries, not code anybody here writes.
+      # All 15 of its detect-non-literal-regexp hits are zod building schema
+      # regexes from its own static definitions. Baselining a *count* against a
+      # minified bundle would also be unstable: the number moves every time
+      # upstream regenerates it, so the baseline would fail on unrelated PRs.
+      #
       # The whole rule set runs and check_opengrep.py sorts the output into
       # tiers by each rule's own metadata. Filtering by passing only the
       # security/ directories would be faster and wrong: it would silently drop
@@ -231,7 +239,7 @@ jobs:
             --config /tmp/rules/typescript \
             --no-git-ignore --json --quiet \
             --timeout 60 \
-            --exclude=node_modules --exclude=target --exclude=dist \
+            --exclude=node_modules --exclude=target --exclude=dist --exclude=_dist \
             headroom/ sdk/ plugins/ > /tmp/opengrep.json
           test -s /tmp/opengrep.json
 
