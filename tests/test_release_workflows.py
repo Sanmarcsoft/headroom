@@ -70,18 +70,32 @@ def test_docker_workflow_normalizes_repository_name_for_signing() -> None:
     assert "steps.image-name.outputs.image_name" in content
 
 
-def test_docker_latest_promotion_is_owned_by_root_manifest_cell() -> None:
+def test_docker_latest_promotion_is_owned_by_a_dedicated_post_manifest_job() -> None:
+    """This fork promotes :latest from its own job, not from the root manifest cell.
+
+    Upstream runs the promotion as the last step of the root ``docker-manifest``
+    matrix cell. That cell can finish before the other seven, and GHCR sorts a
+    package's version listing by ``created_at``, so whichever variant finished
+    last ends up displayed on top with the root :latest image buried below it.
+    Fork commit 5568d738 moved the promotion into ``promote-latest``, which
+    ``needs: docker-manifest`` and therefore runs after every variant.
+
+    The invariant upstream's test protects is unchanged and asserted below:
+    exactly one place promotes, it promotes the root tag only, and it runs
+    after the manifests are built and signed.
+    """
     workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "docker.yml").read_text())
     jobs = workflow["jobs"]
     build = jobs["docker-build"]
     manifest = jobs["docker-manifest"]
+    promote = jobs["promote-latest"]
     variants = manifest["strategy"]["matrix"]["variant"]
     build_variants = build["strategy"]["matrix"]["variant"]
     architectures = build["strategy"]["matrix"]["arch"]
     root = next(entry for entry in variants if entry["name"] == "")
     nonroot = next(entry for entry in variants if entry["name"] == "nonroot")
     promotion = next(
-        step for step in manifest["steps"] if step["name"] == "Re-tag root image as :latest"
+        step for step in promote["steps"] if step["name"] == "Re-tag root image as :latest"
     )
     command = promotion["run"]
 
@@ -91,22 +105,46 @@ def test_docker_latest_promotion_is_owned_by_root_manifest_cell() -> None:
     assert {entry["platform"] for entry in architectures} == {"linux/amd64", "linux/arm64"}
     assert root["name"] == ""
     assert nonroot["name"] == "nonroot"
-    assert "matrix.variant.name == ''" in promotion["if"]
-    assert "steps.manifest.outputs.index_digest != ''" in promotion["if"]
-    assert "steps.version.outputs.version != ''" in promotion["if"]
-    assert (
-        promotion["if"]
-        == "steps.manifest.outputs.index_digest != '' && matrix.variant.name == '' && steps.version.outputs.version != ''"
+
+    # Exactly one step in the whole workflow pushes a bare :latest tag.
+    promotions = [
+        (job_name, step["name"])
+        for job_name, job in jobs.items()
+        for step in job.get("steps", [])
+        if '--tag "${IMAGE}:latest"' in step.get("run", "")
+    ]
+    assert promotions == [("promote-latest", "Re-tag root image as :latest")]
+
+    # The manifest job keeps upstream's belt-and-braces check that a suffixed
+    # variant can never publish a bare :latest, even though the promotion no
+    # longer lives there.
+    variant_guard = next(
+        step["run"] for step in manifest["steps"] if step["name"] == "Create multi-arch manifest"
     )
+    assert "would publish a bare :latest tag" in variant_guard
+
+    # The promote job has no matrix and no `manifest` step, so upstream's
+    # in-cell condition would silently evaluate to false here. See
+    # tests/test_workflow_step_contexts.py for the general guard.
+    assert "strategy" not in promote
+    assert promotion["if"] == "steps.version.outputs.version != ''"
     assert '"${IMAGE}:latest"' in command
     assert '"${IMAGE}:${VERSION}"' in command
-    assert "promote-latest" not in jobs
+
+    # Ordering: promotion happens after every variant manifest is built and signed.
+    assert promote["needs"] == "docker-manifest"
     assert manifest["needs"] == "docker-build"
-    assert manifest["if"] == "${{ always() }}"
-    step_names = [step["name"] for step in manifest["steps"]]
-    assert step_names.index("Sign multi-arch index manifest with cosign") < step_names.index(
-        "Re-tag root image as :latest"
-    )
+    assert "Sign multi-arch index manifest with cosign" in [
+        step["name"] for step in manifest["steps"]
+    ]
+    assert "Re-tag root image as :latest" not in [step["name"] for step in manifest["steps"]]
+
+    # Publishing stays opt-in on every job in the chain.
+    gate = "vars.HEADROOM_PUBLISH_IMAGES == 'true'"
+    assert gate in build["if"]
+    assert gate in manifest["if"]
+    assert gate in promote["if"]
+
     manifest_script = next(
         step["run"] for step in manifest["steps"] if step["name"] == "Create multi-arch manifest"
     )

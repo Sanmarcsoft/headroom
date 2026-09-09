@@ -234,9 +234,12 @@ jobs:
     # Same opt-in gate as docker-build. `needs` alone would already skip this
     # when the build is skipped, but the guard is repeated so that removing or
     # reordering a dependency can never silently re-enable publishing.
-    if: vars.HEADROOM_PUBLISH_IMAGES == 'true'
+    # `always()` is upstream's: the manifest still has to assemble when a
+    # matrix leg was skipped. It is ANDed with the gate rather than replacing
+    # it -- as a second `if:` key it silently won, because YAML keeps the last
+    # duplicate, and the publish gate was dead from the merge until this fix.
+    if: ${{ always() && vars.HEADROOM_PUBLISH_IMAGES == 'true' }}
     needs: docker-build
-    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
@@ -289,7 +292,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download per-arch digests for this variant
+      - name: Download amd64 digest for this variant
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: digests-${{ matrix.variant.name || 'root' }}-amd64
@@ -474,12 +477,20 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Re-tag root image as :latest
-        if: steps.manifest.outputs.index_digest != '' && matrix.variant.name == '' && steps.version.outputs.version != ''
+        # Deliberately NOT upstream's in-manifest condition. This job has no
+        # matrix and no step with `id: manifest`, and Actions resolves an
+        # unknown context to the empty string rather than failing, so
+        # `steps.manifest.outputs.index_digest != ''` would be false forever.
+        # Guarded by tests/test_workflow_step_contexts.py.
+        if: steps.version.outputs.version != ''
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ steps.image-name.outputs.image_name }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # Add a unique annotation so GHCR records a fresh root package version.
+          # Add a unique annotation so the resulting image index manifest gets
+          # a new digest, which makes GHCR record a fresh package version with
+          # current timestamp (otherwise the existing root manifest is reused
+          # and stays where it was in the version listing).
           promoted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           docker buildx imagetools create \
             --annotation "index:io.headroom.promoted-at=${promoted_at}" \

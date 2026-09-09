@@ -26,6 +26,12 @@ inherited  docker.yml               # packages: write; pushes images to ghcr.io 
 inherited  release-please.yml       # contents+pull-requests write; opens release PRs and tags releases on this fork.
 inherited  stale.yml                # issues+pull-requests write; would auto-close the Fork Hardening issues.
 inherited  pr-health.yml            # pull_request_target with issues+pull-requests write; applies upstream's PR governance to our PRs. Audited: checks out base.sha, not PR head, so not the classic escalation. Still upstream's rules, not ours.
+inherited  release-metadata-sync.yml # contents: write; commits and force-re-pushes to release-please--branches--**
+                                     # using RELEASE_PLEASE_TOKEN. Arrived in the 0.37.0 sync. It is the companion to
+                                     # release-please.yml, which is already inherited here, so it has nothing to sync.
+                                     # It also runs scripts/version-sync.py *from the pushed branch* in a job that
+                                     # later holds a write token; upstream mitigates with persist-credentials: false
+                                     # and late token scoping, but the branch glob is unprotected. Stays off.
 
 # ── inherited: sends data to a third party, or spends a key ───────────────────
 inherited  ci.yml                   # 18 jobs; uploads coverage to Codecov and wants HF_TOKEN. Replaced by fork-gate.yml.
@@ -35,6 +41,11 @@ inherited  network-diff-capture.yml # spends ANTHROPIC_API_KEY.
 
 # ── inherited: superseded by a fork-owned equivalent ──────────────────────────
 inherited  security.yml             # good workflow, but unpinned. fork-security.yml is the pinned derivative.
+inherited  tools-hash-refresh.yml   # verifies headroom/tools.json SHA-256 pins against the published assets, which is
+                                    # a property this fork wants (see the fail-closed Sha256Unpinned check in
+                                    # headroom/binaries.py). Off for the same reason as security.yml: its actions are
+                                    # on mutable tags (checkout@v4, setup-python@v7), and this fork pins by SHA.
+                                    # Follow-up: port the `refresh_tool_hashes.py --check` step into fork-security.yml.
 
 # ── inherited: upstream development machinery, no value on a mirror ───────────
 inherited  changelog-guard.yml      # enforces upstream's changelog convention.

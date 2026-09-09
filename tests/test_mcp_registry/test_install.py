@@ -104,13 +104,27 @@ def test_build_serena_spec_uses_agent_context() -> None:
     assert spec.env == {}
 
 
-def test_build_serena_spec_uses_pypi_not_git_source() -> None:
-    """Serena is installed from the PyPI package (prebuilt wheels), not the git
-    source, which forces a from-source build that fails under proot-based
-    filesystems where uv cannot hardlink into a build venv (#2871)."""
+def test_build_serena_spec_uses_the_immutable_git_pin() -> None:
+    """Inverted from upstream, deliberately.
+
+    Upstream installs Serena from the PyPI package `serena-agent` because the
+    git source forces a from-source build that fails under proot-based
+    filesystems, where uv cannot hardlink into a build venv (#2871). That is a
+    real constraint, and it is not one this fork is under: it deploys as an
+    OrbStack/Docker sidecar on macOS and Linux, never under proot.
+
+    What the PyPI form costs is the pin. `serena-agent` resolves to whatever
+    version the index serves at install time, so the bytes that end up
+    executing are not the bytes anyone reviewed. This fork pins an immutable
+    40-hex commit instead and accepts the proot limitation. An operator who
+    needs proot can override SERENA_PACKAGE_SPEC.
+
+    tests/test_serena_pin.py asserts the pin's shape; this asserts that the
+    spec builder actually uses it.
+    """
     spec = build_serena_spec("codex")
-    assert "serena-agent" in spec.args
-    assert not any("git+" in arg for arg in spec.args)
+    assert any(arg.startswith("git+https://github.com/oraios/serena@") for arg in spec.args)
+    assert "serena-agent" not in spec.args
 
 
 def test_build_serena_spec_disables_dashboard_popup_by_default() -> None:
