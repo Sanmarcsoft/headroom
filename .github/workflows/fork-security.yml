@@ -353,10 +353,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          python-version: "3.12"
-          cache-suffix: security-tool-pins # distinct key, see the pip-audit job
+      # No setup-uv here, deliberately. refresh_tool_hashes.py is pure stdlib
+      # (argparse, hashlib, json, sys, urllib.request, pathlib), so the runner's
+      # own python3 runs it. The first version of this job did add setup-uv for
+      # symmetry with the other jobs; the check step passed and the action's
+      # cache post-step then failed the whole job. An action pulled in for
+      # tidiness that can fail after the work is done is a worse trade than one
+      # job that looks slightly different from its neighbours.
 
       # The port of the `refresh_tool_hashes.py --check` step out of the
       # inherited tools-hash-refresh.yml, which is disabled here because its
