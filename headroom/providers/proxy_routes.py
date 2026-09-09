@@ -70,6 +70,7 @@ from headroom.proxy.request_scope import normalize_request_path
 from headroom.proxy.ssrf import (
     UpstreamBaseUrlBlocked,
     check_upstream_base_url_async,
+    describe_upstream_block,
 )
 
 logger = logging.getLogger("headroom.proxy.routes")
@@ -82,11 +83,7 @@ def _ssrf_rejection_response(exc: UpstreamBaseUrlBlocked) -> JSONResponse:
         content={
             "error": {
                 "type": "invalid_request_error",
-                "message": (
-                    "upstream base URL rejected by SSRF policy: "
-                    f"{exc.hostname!r} resolves to a loopback, private, "
-                    "link-local or otherwise reserved address"
-                ),
+                "message": describe_upstream_block(exc.hostname, exc.reason),
             }
         },
     )

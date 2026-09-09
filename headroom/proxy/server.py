@@ -177,6 +177,7 @@ from headroom.proxy.ssrf import (
     UPSTREAM_BASE_URL_HEADER,
     UpstreamBaseUrlBlocked,
     check_upstream_base_url,
+    describe_upstream_block,
 )
 from headroom.proxy.tool_schema_savings_policy import tool_schema_saved_from_tags
 from headroom.proxy.warmup import WarmupRegistry
@@ -3525,11 +3526,7 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 content={
                     "error": {
                         "type": "invalid_request_error",
-                        "message": (
-                            "upstream base URL rejected by SSRF policy: "
-                            f"{exc.hostname!r} resolves to a loopback, private, "
-                            "link-local or otherwise reserved address"
-                        ),
+                        "message": describe_upstream_block(exc.hostname, exc.reason),
                     }
                 },
             )

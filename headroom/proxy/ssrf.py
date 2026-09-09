@@ -30,6 +30,12 @@ from urllib.parse import urlparse
 
 from headroom.envflags import env_flag_enabled
 from headroom.proxy.upstream_guard import (
+    ALLOWED_BASE_URLS_ENV,
+    REASON_BAD_SCHEME,
+    REASON_INTERNAL_ADDRESS,
+    REASON_NO_HOST,
+    REASON_NOT_ALLOWLISTED,
+    REASON_UNRESOLVABLE,
     classify_upstream_url,
     is_internal_address,
     resolve_host_addresses,
@@ -105,6 +111,47 @@ def is_blocked_hostname(hostname: str) -> bool:
     return any(is_internal_address(address) for address in addresses)
 
 
+# One message per reason code, in one place. Both rejection sites (the boundary
+# middleware in proxy/server.py and the per-route handler in
+# providers/proxy_routes.py) render through this. They previously carried two
+# copies of a single hardcoded sentence, written before classify_upstream_url
+# grew reason codes, so every rejection claimed the value "resolves to a
+# loopback, private, link-local or otherwise reserved address" -- including
+# `://bad-base`, which has no host to resolve and interpolated its hostname as
+# None. A caller debugging their own configuration was told something untrue.
+# One template per reason code, in one place. Both rejection sites (the boundary
+# middleware in proxy/server.py and the per-route handler in
+# providers/proxy_routes.py) render through this.
+#
+# `{host}` is filled only where the reason actually produced a hostname. The
+# three parse-level reasons never do: urlparse("://bad-base") yields an empty
+# scheme and a None host, so a template that names a host would print None.
+_REASON_TEMPLATES: dict[str, str] = {
+    REASON_BAD_SCHEME: "the scheme is not http or https",
+    REASON_NO_HOST: "the value has no host",
+    REASON_NOT_ALLOWLISTED: "host {host} is not named in " + ALLOWED_BASE_URLS_ENV,
+    REASON_UNRESOLVABLE: "host {host} could not be resolved within the timeout",
+    REASON_INTERNAL_ADDRESS: (
+        "host {host} resolves to a loopback, private, link-local or otherwise reserved address"
+    ),
+}
+
+
+def describe_upstream_block(hostname: str | None, reason: str) -> str:
+    """Render the caller-facing explanation for a blocked upstream base URL.
+
+    Before this existed, both rejection sites carried the same hardcoded
+    sentence, written before :func:`classify_upstream_url` grew reason codes.
+    Every rejection therefore claimed the value resolved to a reserved address
+    -- including one with no host to resolve, whose hostname interpolated as
+    ``None``. A caller debugging their own configuration was told something
+    untrue, in two places that could drift independently.
+    """
+    template = _REASON_TEMPLATES.get(reason, f"it violates SSRF policy ({reason})")
+    detail = template.format(host=repr(hostname) if hostname else "the supplied host")
+    return f"upstream base URL rejected by SSRF policy: {detail}"
+
+
 def check_upstream_base_url(raw_base_url: str | None) -> None:
     """Raise :class:`UpstreamBaseUrlBlocked` if the header value is not allowed.
 
@@ -139,7 +186,7 @@ def check_upstream_base_url(raw_base_url: str | None) -> None:
         hostname,
         reason,
         ALLOW_PRIVATE_UPSTREAM_BASE_URL_ENV,
-        "HEADROOM_ALLOWED_BASE_URLS",
+        ALLOWED_BASE_URLS_ENV,
     )
     raise UpstreamBaseUrlBlocked(hostname, reason=reason)
 

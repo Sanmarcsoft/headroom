@@ -248,3 +248,56 @@ def test_boundary_middleware_is_the_enforcement_point() -> None:
 
     source = pathlib.Path(server.__file__).read_text(encoding="utf-8")
     assert "check_upstream_base_url(request.headers.get(UPSTREAM_BASE_URL_HEADER))" in source
+
+
+# ---------------------------------------------------------------------------
+# Rejection message accuracy.
+#
+# classify_upstream_url returns five distinct reason codes, but both places
+# that render a 400 were written before those codes existed and hardcode
+# "resolves to a loopback, private, link-local or otherwise reserved address".
+# So `://bad-base`, which has no host at all, is reported as an address that
+# resolves somewhere private, and the hostname interpolates as None. A caller
+# debugging their own config is told something untrue.
+# ---------------------------------------------------------------------------
+
+
+def test_rejection_message_names_the_actual_reason() -> None:
+    """Each reason code renders a message that describes that reason."""
+    from urllib.parse import urlparse
+
+    from headroom.proxy.ssrf import describe_upstream_block
+    from headroom.proxy.upstream_guard import classify_upstream_url
+
+    # A value with no scheme also has no parseable host, so urlparse reports
+    # the scheme problem first. The point is that each message describes what
+    # was actually wrong and never prints a None hostname.
+    cases = {
+        "://bad-base": "scheme is not http or https",
+        "/just/a/path": "scheme is not http or https",
+        "file:///etc/passwd": "scheme is not http or https",
+        "http://127.0.0.1:9999": "resolves to a loopback, private, link-local",
+        "http://100.64.0.1": "resolves to a loopback, private, link-local",
+        "http://no-such-host.invalid": "could not be resolved",
+    }
+    for value, expected_fragment in cases.items():
+        reason = classify_upstream_url(value)
+        assert reason is not None, f"{value} should be rejected"
+        message = describe_upstream_block(urlparse(value).hostname, reason)
+        assert expected_fragment in message, f"{value} -> {message!r}"
+        assert "None" not in message, f"{value} leaked a None hostname: {message!r}"
+
+
+def test_both_rejection_sites_render_the_same_message() -> None:
+    """The middleware and the route handler must not drift on wording."""
+    import inspect
+
+    from headroom.providers import proxy_routes
+    from headroom.proxy import server
+
+    for module in (proxy_routes, server):
+        source = inspect.getsource(module)
+        assert "resolves to a loopback, private, " not in source, (
+            f"{module.__name__} still hardcodes the message instead of "
+            "calling describe_upstream_block"
+        )
