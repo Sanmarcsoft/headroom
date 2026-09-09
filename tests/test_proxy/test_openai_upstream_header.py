@@ -40,6 +40,12 @@ from headroom.proxy.ssrf import UpstreamBaseUrlBlocked  # noqa: E402
 _PUBLIC_ADDRINFO = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
 
 
+@pytest.fixture(autouse=True)
+def _allow_reserved_test_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Permit the reserved, intentionally unresolvable test origin."""
+    monkeypatch.setenv("HEADROOM_ALLOWED_BASE_URLS", "gateway.example")
+
+
 class _FakeRequest:
     """Minimal stand-in exposing ``headers`` like a real Starlette request.
 
