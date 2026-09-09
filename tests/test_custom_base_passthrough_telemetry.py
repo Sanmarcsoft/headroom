@@ -16,22 +16,25 @@ from headroom.proxy.handlers.openai import OpenAIHandlerMixin
 
 
 @pytest.fixture(autouse=True)
-def _resolve_test_hosts_as_public(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the .example hosts in this module resolve to a public address.
+def _allow_test_upstreams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the .example hosts in this module pass both SSRF guards.
 
-    The SSRF guard fails closed on a hostname that does not resolve, which is
-    correct in production but would block every fake host used here. Stubbing
-    resolution keeps these tests about their own subject rather than about DNS.
+    `headroom/proxy/ssrf.py` fails closed on a hostname that does not resolve,
+    so stub resolution to a public address. `headroom/proxy/upstream_guard.py`
+    consults an operator allowlist, so name the reserved test origins there.
+    Both are correct in production; stubbing keeps these tests about their own
+    subject rather than about DNS.
     """
     import socket as _socket
 
-    import headroom.proxy.ssrf as _ssrf
+    import headroom.proxy.upstream_guard as upstream_guard_module
 
     monkeypatch.setattr(
-        _ssrf.socket,
+        upstream_guard_module.socket,
         "getaddrinfo",
         lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
     )
+    monkeypatch.setenv("HEADROOM_ALLOWED_BASE_URLS", "custom.example,opencode.ai,www.opencode.ai")
 
 
 class _Runtime:

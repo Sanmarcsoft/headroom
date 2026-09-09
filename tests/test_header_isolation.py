@@ -38,6 +38,13 @@ from headroom.proxy.helpers import (
 )
 from headroom.proxy.server import ProxyConfig, create_app
 
+
+@pytest.fixture(autouse=True)
+def _allow_reserved_test_upstream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Permit the reserved override used by the end-to-end isolation test."""
+    monkeypatch.setenv("HEADROOM_ALLOWED_BASE_URLS", "override.example")
+
+
 # ---------------------------------------------------------------------------
 # Pure helper unit tests
 # ---------------------------------------------------------------------------
@@ -53,10 +60,10 @@ def _resolve_test_hosts_as_public(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     import socket as _socket
 
-    import headroom.proxy.ssrf as _ssrf
+    import headroom.proxy.upstream_guard as upstream_guard_module
 
     monkeypatch.setattr(
-        _ssrf.socket,
+        upstream_guard_module.socket,
         "getaddrinfo",
         lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
     )
@@ -644,7 +651,9 @@ def test_anthropic_no_extra_headers_configured_is_unchanged() -> None:
 def test_merge_extra_headers_overrides_case_insensitively() -> None:
     """A configured extra header wins even when the client used different casing."""
     out = merge_extra_headers(
-        {"Authorization": "client", "keep": "v"}, {"authorization": "gateway"}
+        {"Authorization": "client", "keep": "v"},
+        {"authorization": "gateway"},
+        upstream_url=None,
     )
     assert out == {"authorization": "gateway", "keep": "v"}
     # Exactly one authorization header survives (no duplicate casings upstream).
@@ -654,4 +663,4 @@ def test_merge_extra_headers_overrides_case_insensitively() -> None:
 def test_merge_extra_headers_none_returns_same_object() -> None:
     """No configured extras -> caller's dict is returned unchanged (no copy)."""
     headers = {"a": "b"}
-    assert merge_extra_headers(headers, None) is headers
+    assert merge_extra_headers(headers, None, upstream_url=None) is headers

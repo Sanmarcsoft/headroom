@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
-import headroom.proxy.ssrf as ssrf_module
+import headroom.proxy.upstream_guard as upstream_guard_module
 from headroom.providers.registry import (
     ProviderApiTargets,
     ProxyProviderRuntime,
@@ -14,6 +15,7 @@ from headroom.providers.registry import (
     create_proxy_backend,
     format_backend_status,
 )
+from headroom.proxy import upstream_guard
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +30,7 @@ def _resolve_test_hosts_as_public(monkeypatch: pytest.MonkeyPatch) -> None:
     import socket as _socket
 
     monkeypatch.setattr(
-        ssrf_module.socket,
+        upstream_guard_module.socket,
         "getaddrinfo",
         lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
     )
@@ -104,12 +106,20 @@ def test_proxy_provider_runtime_selects_targets_and_providers() -> None:
     assert runtime.select_passthrough_base_url({"x-goog-api-key": "test"}) == (
         "https://gemini.example"
     )
-    assert (
-        runtime.select_passthrough_base_url(
-            {"api-key": "azure-key", "x-headroom-base-url": "https://azure.example/openai/"}
+    # The Azure branch honours the override only after the SSRF guard clears
+    # the destination (CVE-2026-77775), and `azure.example` does not resolve.
+    # Pin a public answer so this stays a test of target *precedence*.
+    with patch.object(
+        upstream_guard.socket,
+        "getaddrinfo",
+        return_value=[(None, None, None, None, ("20.10.10.10", 443))],
+    ):
+        assert (
+            runtime.select_passthrough_base_url(
+                {"api-key": "azure-key", "x-headroom-base-url": "https://azure.example/openai/"}
+            )
+            == "https://azure.example/openai"
         )
-        == "https://azure.example/openai"
-    )
     assert runtime.select_passthrough_base_url({}) == "https://openai.example"
 
 

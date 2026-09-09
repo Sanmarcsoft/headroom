@@ -24,13 +24,22 @@ checks remain as defense in depth.
 
 from __future__ import annotations
 
-import ipaddress
+import asyncio
 import logging
-import socket
-from typing import cast
 from urllib.parse import urlparse
 
 from headroom.envflags import env_flag_enabled
+from headroom.proxy.upstream_guard import (
+    ALLOWED_BASE_URLS_ENV,
+    REASON_BAD_SCHEME,
+    REASON_INTERNAL_ADDRESS,
+    REASON_NO_HOST,
+    REASON_NOT_ALLOWLISTED,
+    REASON_UNRESOLVABLE,
+    classify_upstream_url,
+    is_internal_address,
+    resolve_host_addresses,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,63 +79,77 @@ def allow_private_upstream_base_url() -> bool:
 def is_blocked_address(address: str) -> bool:
     """Return True if ``address`` must not be reachable via the header.
 
-    Blocks loopback (127.0.0.0/8, ::1), RFC1918 private ranges, RFC4193 IPv6
-    ULA (fd00::/8, a subset of the stdlib's fc00::/7 ``is_private``),
-    link-local including the cloud metadata address 169.254.169.254
-    (169.254.0.0/16, fe80::/10), and IPv4-mapped IPv6 forms of any of the above
-    (``::ffff:127.0.0.1``). Unparseable input fails closed.
+    Delegates to the shared classifier in
+    :mod:`headroom.proxy.upstream_guard`, which is the fork's single definition
+    of "internal". This module used to carry a second one; the two agreed on
+    loopback, RFC1918, link-local, IPv4-mapped, NAT64, 6to4 and Teredo, and
+    disagreed on RFC 6598 shared address space (100.64.0.0/10), which is not
+    ``is_private`` and which this module therefore allowed. Two definitions of
+    a security predicate is one too many.
     """
-    try:
-        parsed: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(address)
-    except ValueError:
-        return True
-    if isinstance(parsed, ipaddress.IPv6Address) and parsed.ipv4_mapped is not None:
-        parsed = parsed.ipv4_mapped
-    return bool(
-        parsed.is_private
-        or parsed.is_loopback
-        or parsed.is_link_local
-        or parsed.is_reserved
-        or parsed.is_unspecified
-        or parsed.is_multicast
-    )
+    return is_internal_address(address)
 
 
 def is_blocked_hostname(hostname: str) -> bool:
     """Resolve ``hostname`` and return True if it must be blocked.
 
     An IP literal is checked directly with no DNS lookup. A name is resolved
-    via ``socket.getaddrinfo`` and EVERY returned address is checked: an
-    attacker controlling the DNS answer could otherwise order records so a
+    under a bounded wait and EVERY returned address is checked: an attacker
+    controlling the DNS answer could otherwise order records so a
     first-record-only check passes while another returned address is private.
-    Resolution failure fails closed.
+    Resolution failure, and resolution that overruns its budget, fail closed.
 
-    Residual risk, DNS rebinding: this resolves once, here. The outbound
-    request is made later by the shared ``httpx.AsyncClient``, which resolves
-    again, and there is no IP pinning between the two. A low-TTL record serving
-    a public address now and a private address moments later still passes.
-    Closing that needs connect-time pinning via a custom httpx transport, which
-    is tracked separately and is not attempted here.
+    Residual risk, DNS rebinding: this resolves once, here, and the outbound
+    request resolves again later. That gap is closed separately by
+    :mod:`headroom.proxy.pinned_transport`, which resolves once, checks every
+    address, and then connects to the IP literal while preserving the Host
+    header and TLS SNI.
     """
-    try:
-        ipaddress.ip_address(hostname)
-    except ValueError:
-        pass  # Not an IP literal, resolve it below.
-    else:
-        return is_blocked_address(hostname)
-
-    try:
-        infos = socket.getaddrinfo(hostname, None)
-    except (socket.gaierror, UnicodeError, OSError):
-        return True  # Resolution failed, fail closed.
-    if not infos:
+    addresses = resolve_host_addresses(hostname)
+    if addresses is None:
         return True
-    # ``getaddrinfo`` returns sockaddr as ``(host, port)`` for AF_INET and
-    # ``(host, port, flowinfo, scope_id)`` for AF_INET6. mypy unions those tuple
-    # shapes, so ``info[4][0]`` widens to ``str | int``; at runtime the first
-    # element is always the address string. The cast records that rather than
-    # papering over it with ``str()``, which would silently stringify an int.
-    return any(is_blocked_address(cast(str, info[4][0])) for info in infos)
+    return any(is_internal_address(address) for address in addresses)
+
+
+# One message per reason code, in one place. Both rejection sites (the boundary
+# middleware in proxy/server.py and the per-route handler in
+# providers/proxy_routes.py) render through this. They previously carried two
+# copies of a single hardcoded sentence, written before classify_upstream_url
+# grew reason codes, so every rejection claimed the value "resolves to a
+# loopback, private, link-local or otherwise reserved address" -- including
+# `://bad-base`, which has no host to resolve and interpolated its hostname as
+# None. A caller debugging their own configuration was told something untrue.
+# One template per reason code, in one place. Both rejection sites (the boundary
+# middleware in proxy/server.py and the per-route handler in
+# providers/proxy_routes.py) render through this.
+#
+# `{host}` is filled only where the reason actually produced a hostname. The
+# three parse-level reasons never do: urlparse("://bad-base") yields an empty
+# scheme and a None host, so a template that names a host would print None.
+_REASON_TEMPLATES: dict[str, str] = {
+    REASON_BAD_SCHEME: "the scheme is not http or https",
+    REASON_NO_HOST: "the value has no host",
+    REASON_NOT_ALLOWLISTED: "host {host} is not named in " + ALLOWED_BASE_URLS_ENV,
+    REASON_UNRESOLVABLE: "host {host} could not be resolved within the timeout",
+    REASON_INTERNAL_ADDRESS: (
+        "host {host} resolves to a loopback, private, link-local or otherwise reserved address"
+    ),
+}
+
+
+def describe_upstream_block(hostname: str | None, reason: str) -> str:
+    """Render the caller-facing explanation for a blocked upstream base URL.
+
+    Before this existed, both rejection sites carried the same hardcoded
+    sentence, written before :func:`classify_upstream_url` grew reason codes.
+    Every rejection therefore claimed the value resolved to a reserved address
+    -- including one with no host to resolve, whose hostname interpolated as
+    ``None``. A caller debugging their own configuration was told something
+    untrue, in two places that could drift independently.
+    """
+    template = _REASON_TEMPLATES.get(reason, f"it violates SSRF policy ({reason})")
+    detail = template.format(host=repr(hostname) if hostname else "the supplied host")
+    return f"upstream base URL rejected by SSRF policy: {detail}"
 
 
 def check_upstream_base_url(raw_base_url: str | None) -> None:
@@ -135,13 +158,14 @@ def check_upstream_base_url(raw_base_url: str | None) -> None:
     A missing or empty value is fine and returns cleanly. This is the one
     function every consumer of the header should call.
 
-    A value with no parseable hostname (``"://bad-base"``, a bare path) also
-    returns cleanly, deliberately. Such a value cannot redirect the outbound
-    request anywhere: the handlers' own normalization rejects it and falls back
-    to the configured upstream. Treating it as an SSRF block would turn
-    malformed input into a 400 and change behaviour unrelated to this policy.
-    The guard's job is to stop a *reachable* private target, not to validate
-    URL syntax.
+    Anything else must earn its way through
+    :func:`headroom.proxy.upstream_guard.classify_upstream_url`, which is the
+    same code path behind :func:`~headroom.proxy.upstream_guard.is_safe_upstream_url`.
+    That includes a non-HTTP scheme and a value with no parseable hostname,
+    both of which this function used to wave through on the argument that
+    handler normalization would reject them downstream. It does, today. Making
+    a security guard's correctness depend on an invariant maintained in another
+    module is how the original bypass happened, so both now fail closed.
     """
     if raw_base_url is None:
         return
@@ -151,14 +175,27 @@ def check_upstream_base_url(raw_base_url: str | None) -> None:
     if allow_private_upstream_base_url():
         return
 
-    hostname = urlparse(candidate).hostname
-    if hostname is None:
+    reason = classify_upstream_url(candidate)
+    if reason is None:
         return
-    if is_blocked_hostname(hostname):
-        logger.warning(
-            "event=upstream_base_url_blocked hostname=%s reason=ssrf_guard "
-            "(set %s=1 to allow internal upstream targets)",
-            hostname,
-            ALLOW_PRIVATE_UPSTREAM_BASE_URL_ENV,
-        )
-        raise UpstreamBaseUrlBlocked(hostname)
+
+    hostname = urlparse(candidate).hostname
+    logger.warning(
+        "event=upstream_base_url_blocked hostname=%s reason=%s "
+        "(set %s=1 to allow internal upstream targets, or name the host in %s)",
+        hostname,
+        reason,
+        ALLOW_PRIVATE_UPSTREAM_BASE_URL_ENV,
+        ALLOWED_BASE_URLS_ENV,
+    )
+    raise UpstreamBaseUrlBlocked(hostname, reason=reason)
+
+
+async def check_upstream_base_url_async(raw_base_url: str | None) -> None:
+    """Async form of :func:`check_upstream_base_url` for event-loop callers.
+
+    Same policy and the same exception. The bounded resolution runs off the
+    loop so a hostile or slow-resolving hostname cannot stall unrelated
+    in-flight requests.
+    """
+    await asyncio.to_thread(check_upstream_base_url, raw_base_url)

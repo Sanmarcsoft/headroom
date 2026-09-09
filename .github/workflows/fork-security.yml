@@ -204,6 +204,14 @@ jobs:
           echo "javascript rules: $(find /tmp/rules/javascript -name '*.yaml' | wc -l)"
           echo "typescript rules: $(find /tmp/rules/typescript -name '*.yaml' | wc -l)"
 
+      # `_dist` joins the exclude list for the same reason `dist` is already
+      # there: headroom/providers/opencode/_dist/entry.opencode.js is a 464 KB
+      # esbuild bundle of third-party libraries, not code anybody here writes.
+      # All 15 of its detect-non-literal-regexp hits are zod building schema
+      # regexes from its own static definitions. Baselining a *count* against a
+      # minified bundle would also be unstable: the number moves every time
+      # upstream regenerates it, so the baseline would fail on unrelated PRs.
+      #
       # The whole rule set runs and check_opengrep.py sorts the output into
       # tiers by each rule's own metadata. Filtering by passing only the
       # security/ directories would be faster and wrong: it would silently drop
@@ -231,7 +239,7 @@ jobs:
             --config /tmp/rules/typescript \
             --no-git-ignore --json --quiet \
             --timeout 60 \
-            --exclude=node_modules --exclude=target --exclude=dist \
+            --exclude=node_modules --exclude=target --exclude=dist --exclude=_dist \
             headroom/ sdk/ plugins/ > /tmp/opengrep.json
           test -s /tmp/opengrep.json
 
@@ -335,6 +343,41 @@ jobs:
           else
             gitleaks detect --source . --no-git --redact --no-banner
           fi
+
+  tool-pins:
+    name: Tool binary pins (tools.json)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No setup-uv here, deliberately. refresh_tool_hashes.py is pure stdlib
+      # (argparse, hashlib, json, sys, urllib.request, pathlib), so the runner's
+      # own python3 runs it. The first version of this job did add setup-uv for
+      # symmetry with the other jobs; the check step passed and the action's
+      # cache post-step then failed the whole job. An action pulled in for
+      # tidiness that can fail after the work is done is a worse trade than one
+      # job that looks slightly different from its neighbours.
+
+      # The port of the `refresh_tool_hashes.py --check` step out of the
+      # inherited tools-hash-refresh.yml, which is disabled here because its
+      # actions ride mutable tags. See ci/workflow-allowlist.txt, which records
+      # this as the follow-up.
+      #
+      # Why the fork needs it and upstream does not. `Sha256Unpinned` in
+      # headroom/binaries.py is fork-owned: a missing pin is a hard failure
+      # instead of a fall back to bare HTTPS trust. That guard is only worth
+      # anything while the pins in headroom/tools.json still match the assets
+      # they name, and nothing else in fork CI reads the published bytes.
+      #
+      # It fetches every asset in the registry, so it is a network job by
+      # nature. A GitHub release URL that starts 404ing fails here, which is
+      # the signal wanted: an asset that moved is a pin that has stopped
+      # describing anything.
+      - name: Verify every pin against the published asset
+        run: python3 scripts/refresh_tool_hashes.py --check
 
   workflow-sast:
     name: Workflow SAST (zizmor)

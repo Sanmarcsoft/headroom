@@ -15,6 +15,14 @@
 # Cargo.lock, docs/, plugins/openclaw/, plugins/opencode/, sdk/typescript/.
 # The last three are clean.
 #
+# Re-measured 2026-09-09 on the 0.37.0 upstream sync, which moved every
+# lockfile and left 21 advisories this file did not know about. Thirteen
+# entries went stale and were pruned: eleven next/sharp/brace-expansion ids
+# that the docs bump aged out, plus RUSTSEC-2025-0119 and RUSTSEC-2026-0204,
+# which the sync's Cargo.lock actually fixed. Eight of the 21 were fixed
+# rather than recorded (toml, nanoid, vitest, @ai-sdk/provider-utils,
+# accelerate); the eight below are the ones with nowhere to go.
+#
 # NOT baselined, fixed instead: 9 High GitPython advisories. The
 # [tool.uv] constraint floor was gitpython>=3.1.50, the exact version all 9 are
 # filed against. Raised to >=3.1.55, which resolves to 3.1.57.
@@ -23,8 +31,6 @@
 # Dependabot on this repo scans npm and pip only, so nothing was watching cargo
 # at all. These three are why the scan reads lockfiles rather than an export.
 RUSTSEC-2024-0436  # paste 1.0.15 unmaintained, no fix published. Proc-macro, compile-time only, no runtime surface.
-RUSTSEC-2025-0119  # number_prefix 0.4.0 unmaintained, no fix published. Formats byte counts for progress bars.
-RUSTSEC-2026-0204  # crossbeam-epoch 0.9.18, fixed in 0.9.20. Transitive and upstream-owned; needs a Cargo.lock bump upstream. Reachable only through the Debug/Pointer impl.
 
 # --- docs/package-lock.json -------------------------------------------------
 # The docs site. docs.yml (Vercel deploy) is disabled in ci/workflow-allowlist.txt,
@@ -32,17 +38,19 @@ RUSTSEC-2026-0204  # crossbeam-epoch 0.9.18, fixed in 0.9.20. Transitive and ups
 # have fixes, but regenerating an upstream-owned lockfile guarantees a conflict on
 # every fork sync, which costs more than it buys while the site is not deployed.
 # If docs.yml is ever promoted to `fork` kind, these stop being acceptable.
-GHSA-4633-3j49-mh5q  # next 16.2.10, fix 16.2.11. Cache confusion on request bodies. Docs site not deployed from this fork.
-GHSA-4c39-4ccg-62r3  # next 16.2.10, fix 16.2.11. Unbounded Server Action payload, Edge runtime. Docs site not deployed from this fork.
-GHSA-68g3-v927-f742  # next 16.2.10, fix 16.2.11. Cache confusion on request bodies. Docs site not deployed from this fork.
-GHSA-6gpp-xcg3-4w24  # next 16.2.10, fix 16.2.11. Middleware bypass, App Router on Turbopack. Docs site not deployed from this fork.
-GHSA-89xv-2m56-2m9x  # next 16.2.10, fix 16.2.11. SSRF in Server Actions on custom servers. Docs site not deployed from this fork.
-GHSA-955p-x3mx-jcvp  # next 16.2.10, fix 16.2.11. Discloses internal Server Function endpoints. Docs site not deployed from this fork.
-GHSA-m99w-x7hq-7vfj  # next 16.2.10, fix 16.2.11. DoS in App Router Server Actions. Docs site not deployed from this fork.
-GHSA-p9j2-gv94-2wf4  # next 16.2.10, fix 16.2.11. SSRF via rewrites with attacker-controlled destination. Docs site not deployed from this fork.
-GHSA-q8wf-6r8g-63ch  # next 16.2.10, fix 16.2.11. DoS in the Image Optimization API via SVG. Docs site not deployed from this fork.
-GHSA-f88m-g3jw-g9cj  # sharp 0.34.5, fix 0.35.0. Inherited libvips CVEs. Build-time image processing for the undeployed docs site.
-GHSA-mh99-v99m-4gvg  # brace-expansion 5.0.7, fix 5.0.8. DoS via unbounded expansion. Transitive dev dependency of the undeployed docs site.
+#
+# Read that trigger literally, because two of the five below are CRITICAL
+# unauthenticated RCE in next, not the cache-confusion class the 2026-07-29
+# entries were. Nothing here builds or serves the site, so nothing executes
+# them; the moment anything does, this section is a release blocker and not a
+# baseline. The three shipping npm lockfiles were fixed instead of recorded on
+# the same day, which is where the line sits: this fork publishes those, and
+# does not publish this.
+GHSA-2xp9-vwfh-vxw4  # next 16.3.0, fix 16.3.3. CRITICAL: unauthenticated RCE in the Image Optimization API when AVIF is enabled. Docs site not built or deployed from this fork.
+GHSA-p293-qw3h-jr36  # next 16.3.0, fix 16.3.3. CRITICAL: unauthenticated RCE on windows-hosted servers. This fork's runners and fleet are linux, and the site is not deployed from here at all.
+GHSA-rgj7-g3m4-5g8c  # sharp 0.35.3, fix 0.35.4. Inherited libheif CVEs, same class as the pruned GHSA-f88m-g3jw-g9cj. Build-time image processing for the undeployed docs site.
+GHSA-w5vr-8v7q-w6rv  # baseline-browser-mapping 2.10.16, fix 2.11.0. Process termination on invalid input. Transitive build-time dependency of the undeployed docs site.
+GHSA-866g-f22w-33x8  # @ai-sdk/provider-utils 4.0.23, fix 4.0.33. Unbounded resource consumption, LOW. Fixed rather than baselined in sdk/typescript, where the same advisory landed on 4.0.21; recorded here only because this lockfile is the one left alone.
 
 # --- uv.lock ----------------------------------------------------------------
 # Both packages arrive through opt-in extras that `--extra all` does not
@@ -52,3 +60,21 @@ GHSA-mh99-v99m-4gvg  # brace-expansion 5.0.7, fix 5.0.8. DoS via unbounded expan
 GHSA-f4j7-r4q5-qw2c  # chromadb 1.1.1, pre-auth code injection (Critical). NO FIX PUBLISHED: affected through 1.5.9, the current release. Transitive via the crewai extra, absent from --extra all. Nothing to upgrade to; revisit when ChromaDB ships a fix.
 PYSEC-2026-311  # Same defect as GHSA-f4j7-r4q5-qw2c under its PYSEC id. See above.
 GHSA-xf7x-x43h-rpqh  # json-repair 0.25.2, fix 0.60.1. Unbounded CPU DoS on circular JSON Schema $ref. Transitive via the crewai extra, absent from --extra all. Constraining it to >=0.60.1 was tried and forced a 403-line re-resolution that downgraded tomli and pulled in textual and pendulum; not worth it for a DoS in an opt-in extra. Revisit when the lock moves for another reason.
+
+# accelerate, via the `voice-train` extra. Confirmed absent from the
+# `--extra all` production export on 2026-09-09 (`uv export --no-dev
+# --extra all` lists 621 packages and none of them is accelerate), which is
+# again why pip-audit reads clean over that set.
+GHSA-4j2p-28q2-5m79  # accelerate 1.12.0, path traversal and DoS via sharded checkpoint weight_map entries. NO FIX PUBLISHED: OSV changed this record on 2026-09-08 from `fixed: 1.14.0` to `last_affected: 1.14.0`, and 1.14.0 is the newest release, so there is nothing to upgrade to. Upgrading 1.12.0 -> 1.14.0 was tried and reverted for that reason. Opt-in voice-train extra, absent from --extra all.
+
+# chromadb again, three advisories the 0.37.0 sync exposed that are NOT the
+# f4j7 defect above. All three are fixed in 1.5.9, and 1.5.9 is unreachable:
+# crewai pins `chromadb~=1.1.0`, which is `>=1.1.0,<1.2.0`, and it still does at
+# 1.15.20, the latest published release. Checked on 2026-09-09 against the PyPI
+# metadata for both 1.6.1 (what the lock resolves) and 1.15.20. So there is no
+# crewai to upgrade *to* that would let chromadb move. Still an opt-in extra,
+# absent from `--extra all`, which is why pip-audit stays green over the
+# production export.
+GHSA-36p7-vc44-83pf  # chromadb 1.1.1, fix 1.5.9. CRITICAL code injection. Unreachable fix: crewai pins chromadb~=1.1.0 at every published version. Opt-in crewai extra, absent from --extra all.
+GHSA-2wm9-hf6c-p5cr  # chromadb 1.1.1, fix 1.5.9. Any authenticated user can read, write, update or delete across tenants. Same unreachable fix and same opt-in extra as above.
+GHSA-xph7-9rjv-w5fr  # chromadb 1.1.1, fix 1.5.9. SimpleRBACAuthorizationProvider does not check which tenant or database the caller is acting on. Same unreachable fix and same opt-in extra as above.

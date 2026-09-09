@@ -24,4 +24,5 @@ regexes = [
   '''sk-ant-dummy''',           # documented placeholder key in the CLI banner (headroom/cli/proxy.py)
   '''ANTHROPIC_API_KEY=''',     # env-var NAME shown in CLI help text (headroom/cli/proxy.py)
   '''Iv1\.b507a08c87ecfe98''',  # GitHub Copilot PUBLIC OAuth client_id (not a secret)
+  '''sk-your-key''',            # documented placeholder in docs/content/docs/opencode-deepseek.mdx
 ]
