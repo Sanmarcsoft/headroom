@@ -13,7 +13,6 @@ from headroom.providers.claude import DEFAULT_API_URL as DEFAULT_ANTHROPIC_API_U
 from headroom.providers.codex import DEFAULT_API_URL as DEFAULT_OPENAI_API_URL
 from headroom.providers.gemini import DEFAULT_API_URL as DEFAULT_GEMINI_API_URL
 from headroom.proxy.ssrf import check_upstream_base_url
-from headroom.proxy.upstream_guard import is_safe_upstream_url
 
 DEFAULT_CLOUDCODE_API_URL = "https://cloudcode-pa.googleapis.com"
 DEFAULT_VERTEX_API_URL = "https://us-central1-aiplatform.googleapis.com"
@@ -82,12 +81,12 @@ class ProxyProviderRuntime:
         if headers.get("api-key"):
             azure_base = headers.get("x-headroom-base-url", "")
             if azure_base:
-                # Defense in depth; the boundary middleware in proxy/server.py
-                # is the authoritative enforcement point.
+                # Same SSRF guard as `proxy_targets.select_passthrough_base_url`;
+                # both resolve a caller-named upstream (CVE-2026-77775). The
+                # boundary middleware in proxy/server.py is the authoritative
+                # enforcement point; this is defense in depth for callers that
+                # reach the runtime directly.
                 check_upstream_base_url(azure_base)
-            # Same SSRF guard as `proxy_targets.select_passthrough_base_url`;
-            # both resolve a caller-named upstream (CVE-2026-77775).
-            if azure_base and is_safe_upstream_url(azure_base):
                 return azure_base.rstrip("/")
         return self.api_targets.openai
 

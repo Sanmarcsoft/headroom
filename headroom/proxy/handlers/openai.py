@@ -34,7 +34,6 @@ from headroom.proxy.identity import resolve_memory_identity
 from headroom.proxy.loopback_guard import is_loopback_host
 from headroom.proxy.ssrf import UPSTREAM_BASE_URL_HEADER, check_upstream_base_url
 from headroom.proxy.stage_timer import StageTimer, emit_stage_timings_log
-from headroom.proxy.upstream_guard import is_safe_upstream_url
 from headroom.proxy.ws_headers import WS_HOP_BY_HOP_HEADERS
 from headroom.proxy.ws_session_registry import (
     TerminationCause,
@@ -407,13 +406,6 @@ def _resolve_openai_upstream_base(request_headers: dict[str, str]) -> str | None
         normalized = f"{normalized}{path}"
 
     if urlparse(normalized).scheme not in {"http", "https"}:
-        return None
-    if not is_safe_upstream_url(normalized):
-        # Client-supplied upstream resolves to a private/loopback/link-local or
-        # cloud-metadata address (SSRF). Ignore the override and fall back to the
-        # configured upstream; set HEADROOM_ALLOWED_BASE_URLS to permit specific
-        # internal endpoints.
-        logger.warning("ignoring unsafe x-headroom-base-url override: %r", raw_base_url)
         return None
     return normalized
 

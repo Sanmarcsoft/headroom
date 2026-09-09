@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse, Response
 
 from headroom.providers.cloudcode import normalize_cloudcode_passthrough_path
@@ -67,8 +67,10 @@ from headroom.proxy.passthrough import (
     custom_base_passthrough_telemetry as _custom_base_passthrough_telemetry,
 )
 from headroom.proxy.request_scope import normalize_request_path
-from headroom.proxy.ssrf import UpstreamBaseUrlBlocked, check_upstream_base_url
-from headroom.proxy.upstream_guard import is_safe_upstream_url_async
+from headroom.proxy.ssrf import (
+    UpstreamBaseUrlBlocked,
+    check_upstream_base_url_async,
+)
 
 logger = logging.getLogger("headroom.proxy.routes")
 
@@ -288,12 +290,9 @@ def register_provider_routes(app: FastAPI, proxy: Any) -> None:
             # Defense in depth; the boundary middleware already rejected a
             # blocked value, so this only fires outside that middleware.
             try:
-                check_upstream_base_url(custom_base)
+                await check_upstream_base_url_async(custom_base)
             except UpstreamBaseUrlBlocked as exc:
                 return _ssrf_rejection_response(exc)
-            if not await is_safe_upstream_url_async(custom_base):
-                logger.warning("rejecting unsafe x-headroom-base-url: %r", custom_base)
-                raise HTTPException(status_code=400, detail="Rejected unsafe upstream base URL")
             return await proxy.handle_anthropic_messages(
                 request, upstream_base_url=custom_base.rstrip("/")
             )
@@ -524,9 +523,10 @@ def register_provider_routes(app: FastAPI, proxy: Any) -> None:
         # proxy at loopback/RFC1918/cloud-metadata and read the response back
         # (CVE-2026-77775).
         custom_base = request.headers.get("x-headroom-base-url", "").strip()
-        if custom_base and not await is_safe_upstream_url_async(custom_base):
-            logger.warning("rejecting unsafe x-headroom-base-url: %r", custom_base)
-            raise HTTPException(status_code=400, detail="Rejected unsafe upstream base URL")
+        try:
+            await check_upstream_base_url_async(custom_base)
+        except UpstreamBaseUrlBlocked as exc:
+            return _ssrf_rejection_response(exc)
         return await proxy.handle_passthrough(
             request,
             _select_passthrough_base_url(proxy, dict(request.headers)),
@@ -546,12 +546,9 @@ def register_provider_routes(app: FastAPI, proxy: Any) -> None:
             # bypass used: /latest/meta-data/... matches no named route, falls
             # through here, and previously reached the metadata service.
             try:
-                check_upstream_base_url(custom_base)
+                await check_upstream_base_url_async(custom_base)
             except UpstreamBaseUrlBlocked as exc:
                 return _ssrf_rejection_response(exc)
-            if not await is_safe_upstream_url_async(custom_base):
-                logger.warning("rejecting unsafe x-headroom-base-url: %r", custom_base)
-                raise HTTPException(status_code=400, detail="Rejected unsafe upstream base URL")
             base_url = custom_base.rstrip("/")
             endpoint_name, provider_name = _custom_base_passthrough_telemetry(
                 request.method,

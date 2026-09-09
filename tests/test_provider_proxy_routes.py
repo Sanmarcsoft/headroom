@@ -10,7 +10,7 @@ import pytest
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-import headroom.proxy.ssrf as ssrf_module
+import headroom.proxy.upstream_guard as upstream_guard_module
 from headroom.providers.codex.runtime import CodexRoutingDecision
 from headroom.proxy import upstream_guard
 from headroom.proxy.project_context import get_current_project
@@ -29,7 +29,7 @@ def _resolve_test_hosts_as_public(monkeypatch: pytest.MonkeyPatch) -> None:
     import socket as _socket
 
     monkeypatch.setattr(
-        ssrf_module.socket,
+        upstream_guard_module.socket,
         "getaddrinfo",
         lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
     )

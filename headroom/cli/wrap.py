@@ -2231,12 +2231,34 @@ def _index_serena_project(*, verbose: bool = False) -> None:
         return
     from headroom.mcp_registry.install import SERENA_PACKAGE_SPEC
 
+    timeout_seconds = _resolve_serena_index_timeout_seconds()
+
+    popen_kwargs: dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "stdin": subprocess.DEVNULL,
+        "text": True,
+        # ``subprocess.Popen`` directly, so the encoding defaults that
+        # ``headroom._subprocess.run`` applies have to be repeated here.
+        "encoding": "utf-8",
+        "errors": "replace",
+        "cwd": str(Path.cwd()),
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
     try:
         proc = subprocess.Popen(
             [
                 "uvx",
-                # PyPI (prebuilt wheels), not the git source that fails to build
-                # under proot-based filesystems (#2871).
+                # The immutable git commit pin from mcp_registry.install, NOT
+                # the floating PyPI "serena-agent" upstream switched to in
+                # #2871. That switch traded a pinned supply chain for a build
+                # that works under proot-based filesystems; this fork keeps the
+                # pin and accepts the proot limitation. tests/test_serena_pin.py
+                # asserts the 40-hex shape.
                 "--from",
                 SERENA_PACKAGE_SPEC,
                 "serena",

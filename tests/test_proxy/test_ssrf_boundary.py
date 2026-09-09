@@ -77,15 +77,21 @@ def test_absent_header_is_not_an_error() -> None:
     check_upstream_base_url("   ")
 
 
-def test_unparseable_value_is_not_a_block() -> None:
-    """A value with no hostname cannot redirect anywhere, so it is not an SSRF.
+def test_unparseable_value_fails_closed() -> None:
+    """Superseded: a value with no parseable hostname is now a block.
 
-    The handlers' own normalization rejects it and falls back to the configured
-    upstream. Raising here would turn malformed input into a 400 and change
-    behaviour unrelated to this policy.
+    This test previously asserted the opposite, on the argument that such a
+    value cannot redirect anywhere because the handlers' own normalization
+    rejects it downstream. That is still true today. It makes the guard's
+    correctness depend on an invariant maintained in a different module, which
+    is precisely the shape of the original CVE-2026-77775 bypass: a guard that
+    was correct given assumptions about code it did not own.
+
+    See tests/test_proxy/test_ssrf_consolidated.py for the full rationale.
     """
-    check_upstream_base_url("://bad-base")
-    check_upstream_base_url("/just/a/path")
+    for value in ("://bad-base", "/just/a/path"):
+        with pytest.raises(UpstreamBaseUrlBlocked):
+            check_upstream_base_url(value)
 
 
 def test_block_is_distinguishable_from_absent() -> None:

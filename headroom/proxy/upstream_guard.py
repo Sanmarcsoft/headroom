@@ -132,32 +132,32 @@ def _is_internal_address(ip: str) -> bool:
     return False
 
 
-def is_safe_upstream_url(url: str) -> bool:
-    """Return True if ``url`` is a safe client-chosen upstream destination.
+def is_internal_address(ip: str) -> bool:
+    """Public name for the shared address classifier.
 
-    In allowlist mode only allowlisted hosts pass. Otherwise the host is
-    resolved and rejected if any resolved address is internal/metadata, which
-    also catches DNS names that point at private space.
+    `headroom/proxy/ssrf.py` delegates to this so the fork has exactly one
+    definition of "internal". Before the #56 sync it had a second one that
+    missed RFC 6598 shared address space.
     """
-    parsed = urlparse((url or "").strip())
-    if parsed.scheme.lower() not in _SAFE_SCHEMES:
-        return False
-    host = parsed.hostname
-    if not host:
-        return False
+    return _is_internal_address(ip)
 
-    allow = _allowlisted_destinations()
-    if allow is not None:
-        hosts, origins = allow
-        if host.lower() in hosts:
-            return True
-        try:
-            port = parsed.port
-        except ValueError:
-            return False
-        if port is None:
-            port = 443 if parsed.scheme.lower() in {"https", "wss"} else 80
-        return (parsed.scheme.lower(), host.lower(), port) in origins
+
+def resolve_host_addresses(host: str) -> list[str] | None:
+    """Resolve ``host`` to every address, under a bounded wait.
+
+    Returns None when resolution fails or overruns the budget, which every
+    caller must treat as unsafe. `socket.getaddrinfo` takes no timeout and runs
+    on the calling thread -- the event loop, for the proxy -- so a hostname that
+    resolves slowly would otherwise stall unrelated in-flight requests.
+
+    An IP literal short-circuits with no lookup at all.
+    """
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass  # A name; resolve it below.
+    else:
+        return [host]
 
     try:
         infos = _RESOLVER_POOL.submit(
@@ -167,9 +167,70 @@ def is_safe_upstream_url(url: str) -> bool:
         # Resolution and connection are separate operations, so allowing a DNS
         # miss here would fail open if the name resolves on the later lookup.
         # A lookup that overruns the budget is treated the same way.
-        # Operators can explicitly allowlist split-horizon/internal endpoints.
-        return False
-    return all(not _is_internal_address(str(info[4][0])) for info in infos)
+        return None
+    if not infos:
+        return None
+    return [str(info[4][0]) for info in infos]
+
+
+# Reason codes. `check_upstream_base_url` puts these on the exception so an
+# operator reading a 400 can tell "you named a private host" apart from
+# "your DNS is broken" apart from "that scheme is not proxyable".
+REASON_BAD_SCHEME = "bad_scheme"
+REASON_NO_HOST = "no_host"
+REASON_NOT_ALLOWLISTED = "not_allowlisted"
+REASON_UNRESOLVABLE = "unresolvable"
+REASON_INTERNAL_ADDRESS = "internal_address"
+
+
+def classify_upstream_url(url: str) -> str | None:
+    """Return None if ``url`` is a safe upstream, else a reason code.
+
+    Single definition of the policy. `is_safe_upstream_url` is the boolean view
+    and `ssrf.check_upstream_base_url` is the raising view; both call this, so
+    they cannot drift apart.
+    """
+    parsed = urlparse((url or "").strip())
+    scheme = parsed.scheme.lower()
+    if scheme not in _SAFE_SCHEMES:
+        return REASON_BAD_SCHEME
+    host = parsed.hostname
+    if not host:
+        return REASON_NO_HOST
+
+    allow = _allowlisted_destinations()
+    if allow is not None:
+        hosts, origins = allow
+        if host.lower() in hosts:
+            return None
+        try:
+            port = parsed.port
+        except ValueError:
+            return REASON_NOT_ALLOWLISTED
+        if port is None:
+            port = 443 if scheme in {"https", "wss"} else 80
+        if (scheme, host.lower(), port) in origins:
+            return None
+        return REASON_NOT_ALLOWLISTED
+
+    addresses = resolve_host_addresses(host)
+    if addresses is None:
+        return REASON_UNRESOLVABLE
+    # EVERY address, not just the first: an attacker who controls the DNS
+    # answer can order the records so a first-record check passes.
+    if any(_is_internal_address(address) for address in addresses):
+        return REASON_INTERNAL_ADDRESS
+    return None
+
+
+def is_safe_upstream_url(url: str) -> bool:
+    """Return True if ``url`` is a safe client-chosen upstream destination.
+
+    In allowlist mode only allowlisted hosts pass. Otherwise the host is
+    resolved and rejected if any resolved address is internal/metadata, which
+    also catches DNS names that point at private space.
+    """
+    return classify_upstream_url(url) is None
 
 
 async def is_safe_upstream_url_async(url: str) -> bool:

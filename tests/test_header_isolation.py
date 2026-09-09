@@ -60,10 +60,10 @@ def _resolve_test_hosts_as_public(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     import socket as _socket
 
-    import headroom.proxy.ssrf as _ssrf
+    import headroom.proxy.upstream_guard as upstream_guard_module
 
     monkeypatch.setattr(
-        _ssrf.socket,
+        upstream_guard_module.socket,
         "getaddrinfo",
         lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
     )

@@ -93,9 +93,7 @@ def test_non_http_schemes_are_rejected(url: str) -> None:
         check_upstream_base_url(url)
 
 
-@pytest.mark.parametrize(
-    "url", ["https://api.openai.com/v1", "http://api.openai.com/v1"]
-)
+@pytest.mark.parametrize("url", ["https://api.openai.com/v1", "http://api.openai.com/v1"])
 def test_http_family_schemes_still_pass(url: str) -> None:
     check_upstream_base_url(url)
 
@@ -132,24 +130,28 @@ def test_slow_resolution_is_bounded_and_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A hostile hostname that resolves slowly must not stall the guard."""
-    import headroom.proxy.ssrf as ssrf
+    import headroom.proxy.upstream_guard as guard
 
     monkeypatch.setenv("HEADROOM_UPSTREAM_RESOLVE_TIMEOUT_S", "0.05")
 
     def _never_returns(*args: Any, **kwargs: Any) -> Any:
         import time
 
-        time.sleep(30)
+        # Deliberately short. A sleep long enough to be dramatic is also long
+        # enough to stall interpreter shutdown, because ThreadPoolExecutor
+        # joins its workers at exit. 2s against a 0.05s budget proves the
+        # bound without leaving a 30s sleeper behind.
+        time.sleep(2)
         raise AssertionError("resolution should have been abandoned")
 
-    monkeypatch.setattr(ssrf.socket, "getaddrinfo", _never_returns)
+    monkeypatch.setattr(guard.socket, "getaddrinfo", _never_returns)
 
     import time
 
     started = time.monotonic()
     with pytest.raises(UpstreamBaseUrlBlocked):
         check_upstream_base_url("http://slowloris.example/v1")
-    assert time.monotonic() - started < 5.0, "guard did not bound the DNS wait"
+    assert time.monotonic() - started < 1.5, "guard did not bound the DNS wait"
 
 
 # --------------------------------------------------------------------------- #
@@ -164,7 +166,7 @@ def test_every_resolved_address_is_checked_not_just_the_first(
 
     A first-record-only check passes while a later record points at loopback.
     """
-    import headroom.proxy.ssrf as ssrf
+    import headroom.proxy.upstream_guard as guard
 
     def _public_then_private(*args: Any, **kwargs: Any) -> list[Any]:
         return [
@@ -172,18 +174,18 @@ def test_every_resolved_address_is_checked_not_just_the_first(
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
         ]
 
-    monkeypatch.setattr(ssrf.socket, "getaddrinfo", _public_then_private)
+    monkeypatch.setattr(guard.socket, "getaddrinfo", _public_then_private)
     with pytest.raises(UpstreamBaseUrlBlocked):
         check_upstream_base_url("http://rebind.example/v1")
 
 
 def test_resolution_failure_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    import headroom.proxy.ssrf as ssrf
+    import headroom.proxy.upstream_guard as guard
 
     def _fail(*args: Any, **kwargs: Any) -> Any:
         raise socket.gaierror("no such host")
 
-    monkeypatch.setattr(ssrf.socket, "getaddrinfo", _fail)
+    monkeypatch.setattr(guard.socket, "getaddrinfo", _fail)
     with pytest.raises(UpstreamBaseUrlBlocked):
         check_upstream_base_url("http://nope.invalid/v1")
 
@@ -198,14 +200,12 @@ def test_metadata_service_is_blocked_by_hostname(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The literal is the obvious form; a name resolving to it is the real one."""
-    import headroom.proxy.ssrf as ssrf
+    import headroom.proxy.upstream_guard as guard
 
     monkeypatch.setattr(
-        ssrf.socket,
+        guard.socket,
         "getaddrinfo",
-        lambda *a, **k: [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (METADATA_IP, 0))
-        ],
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (METADATA_IP, 0))],
     )
     with pytest.raises(UpstreamBaseUrlBlocked):
         check_upstream_base_url("http://metadata.google.internal/")
@@ -248,4 +248,3 @@ def test_boundary_middleware_is_the_enforcement_point() -> None:
 
     source = pathlib.Path(server.__file__).read_text(encoding="utf-8")
     assert "check_upstream_base_url(request.headers.get(UPSTREAM_BASE_URL_HEADER))" in source
-

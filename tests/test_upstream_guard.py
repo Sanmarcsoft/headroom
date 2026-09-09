@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from headroom.providers.proxy_targets import select_passthrough_base_url
 from headroom.proxy.server import ProxyConfig, create_app
+from headroom.proxy.ssrf import UpstreamBaseUrlBlocked
 from headroom.proxy.upstream_guard import is_safe_upstream_url
 
 
@@ -230,12 +231,25 @@ class _StubProxy:
             return "https://api.openai.com"
 
 
-def test_passthrough_base_url_ignores_an_unsafe_azure_override() -> None:
+def test_passthrough_base_url_rejects_an_unsafe_azure_override() -> None:
+    """Rejecting loudly, not ignoring the override and falling back.
+
+    Upstream logged a warning here and returned the configured OpenAI target.
+    That is worse than a 400 in two ways: the caller's `api-key`, which they
+    supplied for their own Azure endpoint, gets forwarded to a provider they
+    never named; and they receive that provider's answer as though the
+    override had been honoured, with nothing in the response to say otherwise.
+
+    This fork raises instead. In the HTTP path the boundary middleware in
+    proxy/server.py has already returned 400, so this fires only for callers
+    reaching the runtime directly.
+    """
     headers = {"api-key": "x", "x-headroom-base-url": "http://169.254.169.254"}
 
-    resolved = select_passthrough_base_url(_StubProxy(), headers)
+    with pytest.raises(UpstreamBaseUrlBlocked) as exc:
+        select_passthrough_base_url(_StubProxy(), headers)
 
-    assert "169.254.169.254" not in resolved
+    assert exc.value.hostname == "169.254.169.254"
 
 
 def test_passthrough_base_url_still_honours_a_safe_azure_override(

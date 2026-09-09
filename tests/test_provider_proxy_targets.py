@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-import headroom.proxy.ssrf as ssrf_module
+import headroom.proxy.upstream_guard as upstream_guard_module
 from headroom.providers.proxy_targets import (
     api_target,
     select_passthrough_base_url,
@@ -26,7 +26,7 @@ def _resolve_test_hosts_as_public(monkeypatch: pytest.MonkeyPatch) -> None:
     import socket as _socket
 
     monkeypatch.setattr(
-        ssrf_module.socket,
+        upstream_guard_module.socket,
         "getaddrinfo",
         lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
     )

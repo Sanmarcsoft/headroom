@@ -15,7 +15,6 @@ from headroom.providers.codex import resolve_codex_routing
 from headroom.providers.codex.endpoints import CHATGPT_BACKEND_API_URL
 from headroom.providers.vertex import vertex_target_for_location as _vertex_target_for_location
 from headroom.proxy.ssrf import check_upstream_base_url
-from headroom.proxy.upstream_guard import is_safe_upstream_url
 
 LEGACY_API_TARGET_ATTRS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_URL",
@@ -52,18 +51,19 @@ def select_passthrough_base_url(
     if headers.get("api-key"):
         azure_base = headers.get("x-headroom-base-url", "")
         if azure_base:
-            # Defense in depth. The boundary middleware in proxy/server.py has
-            # already rejected a blocked value with a 400, so this raises only
-            # if this function is reached outside that middleware.
-            check_upstream_base_url(azure_base)
             # Validate here, not only at the routes. `api-key` is attacker-
             # supplied too, so this branch is reachable by anyone who can send
             # a header, and it returns the destination the caller named. Routes
             # that forgot to guard turned the proxy into an SSRF relay into
             # loopback/RFC1918/cloud-metadata space (CVE-2026-77775).
-            if is_safe_upstream_url(azure_base):
-                return azure_base.rstrip("/")
-            logger.warning("ignoring unsafe x-headroom-base-url override: %r", azure_base)
+            #
+            # This RAISES rather than ignoring the override and falling back to
+            # the configured target. Falling back would ship the caller's
+            # `api-key` to a provider they never named, and would answer with
+            # that provider's response as though the override had been honoured.
+            # A rejection has to be visible.
+            check_upstream_base_url(azure_base)
+            return azure_base.rstrip("/")
     provider_name = proxy.provider_runtime.model_metadata_provider(headers)
     target = api_target(proxy, provider_name)
     if (
