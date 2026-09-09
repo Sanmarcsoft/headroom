@@ -515,6 +515,7 @@ markers = [
     "real_llm: tests that hit real LLM APIs; skipped unless explicitly enabled",
     "live: opt-in multi-turn tests that hit real upstream APIs; require provider keys",
     "proxy_dependency_gate: exercises ensure_proxy_dependencies() without mocking",
+    "real_binary_pins: needs the real tools.json SHA-256 pins; exempt from the _null_binary_pins autouse fixture",
 ]
 
 [tool.coverage.run]

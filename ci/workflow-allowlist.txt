@@ -45,7 +45,8 @@ inherited  tools-hash-refresh.yml   # verifies headroom/tools.json SHA-256 pins 
                                     # a property this fork wants (see the fail-closed Sha256Unpinned check in
                                     # headroom/binaries.py). Off for the same reason as security.yml: its actions are
                                     # on mutable tags (checkout@v4, setup-python@v7), and this fork pins by SHA.
-                                    # Follow-up: port the `refresh_tool_hashes.py --check` step into fork-security.yml.
+                                    # Ported: the `refresh_tool_hashes.py --check` step now runs as the tool-pins
+                                    # job in fork-security.yml, so the property is kept without the mutable tags.
 
 # ── inherited: upstream development machinery, no value on a mirror ───────────
 inherited  changelog-guard.yml      # enforces upstream's changelog convention.

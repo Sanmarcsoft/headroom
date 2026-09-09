@@ -181,7 +181,7 @@ def pytest_runtest_call(item):
 
 
 @pytest.fixture(autouse=True)
-def _null_binary_pins():
+def _null_binary_pins(request):
     """Null the tools.json SHA-256 pins during tests.
 
     Installer tests fetch small mock archives, whose digests can't match the
@@ -190,7 +190,18 @@ def _null_binary_pins():
     specifically exercise verification set their own pin explicitly. Production
     keeps the real pins (this fixture is test-only) and the tools-hash-refresh
     CI gate guarantees they stay correct.
+
+    FORK: `real_binary_pins` opts a test out. This fork makes a missing pin a
+    hard failure (`headroom.binaries.Sha256Unpinned`, fork-owned, absent
+    upstream) rather than a fall back to HTTPS trust, so a test that downloads
+    a real published asset raises here instead of verifying it. Upstream has no
+    such guard, which is why upstream can null unconditionally. The exemption
+    is asserted by tests/test_fork_binary_pin_guard.py so a later sync that
+    drops it fails there rather than at a puzzling Sha256Unpinned elsewhere.
     """
+    if "real_binary_pins" in request.keywords:
+        yield
+        return
     try:
         from headroom import binaries
     except Exception:

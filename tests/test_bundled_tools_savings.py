@@ -127,6 +127,7 @@ def repo(tmp_path_factory) -> Path:
 # ---------- 1. Tool installation ----------------------------------------- #
 
 
+@pytest.mark.real_binary_pins
 def test_ensure_tools_installs_every_tool():
     """All three tools should be reachable after ensure_tools()."""
     binaries.ensure_tools(quiet=True)
@@ -174,6 +175,7 @@ def test_ast_grep_slice_saves_tokens(repo: Path):
     assert savings_pct >= 40, f"expected ≥40% savings, got {savings_pct:.1f}%"
 
 
+@pytest.mark.real_binary_pins
 def test_difftastic_saves_tokens_vs_line_diff(repo: Path):
     """Structural diff should compress smaller than unified line diff."""
     # Baseline: unified line diff via /usr/bin/diff.
@@ -209,6 +211,7 @@ def test_difftastic_saves_tokens_vs_line_diff(repo: Path):
     )
 
 
+@pytest.mark.real_binary_pins
 def test_scc_repo_shape_card_is_tiny(repo: Path):
     """scc produces a repo-shape summary that's much smaller than raw files."""
     raw_bytes = sum(
