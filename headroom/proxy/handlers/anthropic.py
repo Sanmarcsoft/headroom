@@ -1196,6 +1196,7 @@ class AnthropicHandlerMixin:
             # is read from `request.headers` below if needed. From this
             # point on, `headers` is the upstream-bound copy.
             from headroom.proxy.helpers import (
+                _drop_proxy_token_authorization,
                 _strip_internal_headers,
                 log_outbound_headers,
                 merge_extra_headers,
@@ -1203,6 +1204,11 @@ class AnthropicHandlerMixin:
 
             _pre_strip_count = sum(1 for k in headers if k.lower().startswith("x-headroom-"))
             headers = _strip_internal_headers(headers)
+            headers = _drop_proxy_token_authorization(
+                headers,
+                getattr(self.config, "proxy_token", None)
+                or os.environ.get("HEADROOM_PROXY_TOKEN"),
+            )
             # `upstream_base_url` is the per-request `x-headroom-base-url`
             # override when the client sent one. These headers are secrets, so
             # they only travel to a host the operator designated.
@@ -5070,6 +5076,7 @@ class AnthropicHandlerMixin:
         tags = extract_tags(headers)
         # PR-A5 (P5-49): strip internal x-headroom-* before forwarding upstream.
         from headroom.proxy.helpers import (
+            _drop_proxy_token_authorization,
             _strip_internal_headers,
             log_outbound_headers,
             merge_extra_headers,
@@ -5077,6 +5084,11 @@ class AnthropicHandlerMixin:
 
         _pre_strip_count = sum(1 for k in headers if k.lower().startswith("x-headroom-"))
         headers = _strip_internal_headers(headers)
+        headers = _drop_proxy_token_authorization(
+            headers,
+            getattr(self.config, "proxy_token", None)
+            or os.environ.get("HEADROOM_PROXY_TOKEN"),
+        )
         # Always the configured Anthropic target; no per-request override.
         headers = merge_extra_headers(
             headers,
@@ -5366,6 +5378,7 @@ class AnthropicHandlerMixin:
         tags = extract_tags(headers)
         # PR-A5 (P5-49): strip internal x-headroom-* before forwarding upstream.
         from headroom.proxy.helpers import (
+            _drop_proxy_token_authorization,
             _strip_internal_headers,
             log_outbound_headers,
             merge_extra_headers,
@@ -5373,6 +5386,11 @@ class AnthropicHandlerMixin:
 
         _pre_strip_count = sum(1 for k in headers if k.lower().startswith("x-headroom-"))
         headers = _strip_internal_headers(headers)
+        headers = _drop_proxy_token_authorization(
+            headers,
+            getattr(self.config, "proxy_token", None)
+            or os.environ.get("HEADROOM_PROXY_TOKEN"),
+        )
         # Always the configured Anthropic target; no per-request override.
         headers = merge_extra_headers(
             headers,
@@ -5508,6 +5526,7 @@ class AnthropicHandlerMixin:
         tags = extract_tags(headers)
         # PR-A5 (P5-49): strip internal x-headroom-* before forwarding upstream.
         from headroom.proxy.helpers import (
+            _drop_proxy_token_authorization,
             _strip_internal_headers,
             log_outbound_headers,
             merge_extra_headers,
@@ -5515,6 +5534,11 @@ class AnthropicHandlerMixin:
 
         _pre_strip_count = sum(1 for k in headers if k.lower().startswith("x-headroom-"))
         headers = _strip_internal_headers(headers)
+        headers = _drop_proxy_token_authorization(
+            headers,
+            getattr(self.config, "proxy_token", None)
+            or os.environ.get("HEADROOM_PROXY_TOKEN"),
+        )
         # Always the configured Anthropic target; no per-request override.
         headers = merge_extra_headers(
             headers,
