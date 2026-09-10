@@ -84,8 +84,15 @@ class TestInboundAuthToken:
             resp = c.get("/stats", headers={"Authorization": "Bearer wrong"})
             assert resp.status_code == 401
 
-    def test_loopback_is_exempt_from_token(self):
-        """Loopback callers (same trust boundary as admin routes) skip the token."""
+    def test_loopback_requires_token_by_default(self):
+        """Loopback callers must present the token unless explicitly exempted."""
+        app = _make_app(proxy_token="s3cr3t-token")
+        with TestClient(app, base_url="http://127.0.0.1", client=LOOPBACK) as c:
+            assert c.get("/stats").status_code == 401
+
+    def test_loopback_is_exempt_from_token_when_opted_out(self, monkeypatch: pytest.MonkeyPatch):
+        """HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK restores loopback exemption."""
+        monkeypatch.setenv("HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK", "1")
         app = _make_app(proxy_token="s3cr3t-token")
         with TestClient(app, base_url="http://127.0.0.1", client=LOOPBACK) as c:
             assert c.get("/stats").status_code != 401
@@ -205,8 +212,19 @@ class TestWebSocketAuthMiddleware:
         assert downstream.called is True
         assert not _closed_with_policy_violation(sent)
 
-    async def test_loopback_is_exempt(self):
-        """Same trust boundary the HTTP gate already grants loopback."""
+    async def test_loopback_requires_token_by_default(self):
+        """Loopback callers must present token unless explicitly exempted."""
+        downstream = _SpyApp()
+        mw = WebSocketAuthMiddleware(downstream, proxy_token="s3cr3t-token")
+
+        sent = await _drive(mw, _ws_scope(client=LOOPBACK))
+
+        assert downstream.called is False
+        assert _closed_with_policy_violation(sent)
+
+    async def test_loopback_is_exempt_when_opted_out(self, monkeypatch: pytest.MonkeyPatch):
+        """HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK restores loopback exemption."""
+        monkeypatch.setenv("HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK", "1")
         downstream = _SpyApp()
         mw = WebSocketAuthMiddleware(downstream, proxy_token="s3cr3t-token")
 
@@ -215,8 +233,11 @@ class TestWebSocketAuthMiddleware:
         assert downstream.called is True
         assert not _closed_with_policy_violation(sent)
 
-    async def test_unknown_client_is_treated_as_loopback(self):
-        """Mirrors is_loopback_host(None) -> True, as the HTTP gate does."""
+    async def test_unknown_client_treated_as_loopback_when_opted_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Mirrors is_loopback_host(None) -> True when loopback exemption is enabled."""
+        monkeypatch.setenv("HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK", "1")
         downstream = _SpyApp()
         mw = WebSocketAuthMiddleware(downstream, proxy_token="s3cr3t-token")
 

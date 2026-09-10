@@ -2699,6 +2699,23 @@ def read_proxy_token(headers: Mapping[str, str]) -> str | None:
     return None
 
 
+def _loopback_token_exemption_enabled() -> bool:
+    """Return True if loopback callers are exempt from proxy token auth.
+
+    Configured via ``HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK``. Truthy values
+    are ``1``, ``true``, ``yes`` (case-insensitive, whitespace-trimmed).
+    """
+    raw = os.environ.get("HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK")
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("1", "true", "yes")
+
+
+def _is_loopback_token_exempt(client_host: str | None) -> bool:
+    """Return True if ``client_host`` is loopback and the exemption opt-out is enabled."""
+    return _loopback_token_exemption_enabled() and is_loopback_host(client_host)
+
+
 class WebSocketAuthMiddleware:
     """Enforce ``HEADROOM_PROXY_TOKEN`` on WebSocket handshakes.
 
@@ -2715,11 +2732,11 @@ class WebSocketAuthMiddleware:
     Written as a raw ASGI middleware rather than folded into the gate because
     that is the only layer that sees the ``websocket`` scope at all.
 
-    Loopback callers are exempt, matching the HTTP gate exactly (same trust
-    boundary as the admin/debug routes). Credentials are read from headers only:
-    the handshake carries them fine for the programmatic clients these routes
-    serve, and accepting a token from the query string would put it in access
-    logs and browser history.
+    Loopback callers are subject to the same token requirement as external callers
+    unless explicitly exempted via ``HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK``.
+    Credentials are read from headers only: the handshake carries them fine for the
+    programmatic clients these routes serve, and accepting a token from the query
+    string would put it in access logs and browser history.
     """
 
     def __init__(self, app: Any, *, proxy_token: str | None = None) -> None:
@@ -2737,7 +2754,7 @@ class WebSocketAuthMiddleware:
 
         client = scope.get("client")
         client_host = client[0] if client else None
-        if is_loopback_host(client_host):
+        if _is_loopback_token_exempt(client_host):
             await self.app(scope, receive, send)
             return
 
@@ -3662,6 +3679,12 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
             getattr(config, "host", None),
         )
 
+    if _loopback_token_exemption_enabled():
+        logger.warning(
+            "event=proxy_token_loopback_exemption HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK is enabled; "
+            "loopback callers bypass token auth",
+        )
+
     def _apply_security_headers(response) -> None:
         # setdefault: never clobber a header an upstream/handler already set.
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -3678,14 +3701,13 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     @app.middleware("http")
     async def _security_gate(request, call_next):
         # 1) Optional inbound auth. When a token is configured, require it on
-        #    non-loopback requests; loopback callers and health probes are
-        #    exempt. Loopback is the same trust boundary the admin/debug
-        #    endpoints already use (see loopback_guard).
+        #    all requests unless exempted; health probes and loopback callers
+        #    with HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK are exempt.
         if _proxy_token:
             path = request.url.path
             client = getattr(request, "client", None)
             client_host = getattr(client, "host", None) if client is not None else None
-            if path not in _AUTH_EXEMPT_PATHS and not is_loopback_host(client_host):
+            if path not in _AUTH_EXEMPT_PATHS and not _is_loopback_token_exempt(client_host):
                 provided = _extract_proxy_token(request.headers)
                 if provided is None or not hmac.compare_digest(
                     provided.encode("utf-8", "replace"), _proxy_token_bytes
