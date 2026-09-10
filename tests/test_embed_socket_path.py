@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -51,7 +50,9 @@ def test_default_without_xdg_runtime_dir(tmp_path: Path, monkeypatch: pytest.Mon
     assert socket_path_empty_xdg == str(expected_dir / "embed-9001.sock")
 
 
-def test_preexisting_group_or_world_writable_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preexisting_group_or_world_writable_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A pre-existing directory that is group- or world-writable raises a ClickException."""
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     socket_dir = tmp_path / "headroom"
@@ -78,7 +79,9 @@ def test_preexisting_group_or_world_writable_raises(tmp_path: Path, monkeypatch:
     assert "insecure permissions" in str(exc_info.value).lower()
 
 
-def test_preexisting_owned_by_another_uid_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preexisting_owned_by_another_uid_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A pre-existing directory owned by another UID raises a ClickException."""
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     socket_dir = tmp_path / "headroom"
@@ -142,7 +145,9 @@ def test_regular_file_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert "not a directory" in err.lower()
 
 
-def test_explicit_socket_override_used_as_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_socket_override_used_as_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Explicit socket override bypasses default_embed_socket_path and directory checks."""
     import headroom.proxy.server as server_mod
 
@@ -154,14 +159,23 @@ def test_explicit_socket_override_used_as_is(tmp_path: Path, monkeypatch: pytest
 
     result = CliRunner().invoke(
         main,
-        ["proxy", "--embedding-server", "--embedding-server-socket", custom_socket, "--port", "8799"],
+        [
+            "proxy",
+            "--embedding-server",
+            "--embedding-server-socket",
+            custom_socket,
+            "--port",
+            "8799",
+        ],
     )
 
     assert result.exit_code == 0, f"proxy failed: {result.output}"
     assert custom_socket in result.output
 
 
-def test_both_rendezvous_sites_produce_same_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_both_rendezvous_sites_produce_same_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Both proxy rendezvous sites compute the same socket path for the same port."""
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     port = 8787
@@ -188,6 +202,7 @@ def test_load_merged_state_dict_weights_only(tmp_path: Path) -> None:
     """_load_merged_state_dict successfully loads state dicts with weights_only=True."""
     import torch
     import torch.nn as nn
+
     from headroom.transforms.kompress_compressor import _load_merged_state_dict
 
     ckpt_path = tmp_path / "merged.pt"
@@ -212,4 +227,3 @@ def test_load_merged_state_dict_weights_only(tmp_path: Path) -> None:
     _load_merged_state_dict(dummy, str(ckpt_path), "test-model")
     for p1, p2 in zip(encoder.parameters(), dummy.encoder.parameters()):
         assert torch.equal(p1, p2)
-

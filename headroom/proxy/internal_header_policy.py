@@ -33,11 +33,7 @@ def strip_internal_headers(
     """Return a copy of headers with internal x-headroom-* request headers removed."""
 
     if mode == "disabled":
-        return {
-            key: value
-            for key, value in headers.items()
-            if key.lower() != PROXY_TOKEN_HEADER
-        }
+        return {key: value for key, value in headers.items() if key.lower() != PROXY_TOKEN_HEADER}
     return {
         key: value
         for key, value in headers.items()

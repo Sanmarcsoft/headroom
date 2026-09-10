@@ -87,7 +87,12 @@ def test_strip_internal_headers_disabled_preserves_order_and_other_headers() -> 
         "header-2": "val2",
     }
     stripped = strip_internal_headers(headers, mode="disabled")
-    assert list(stripped.keys()) == ["header-1", "x-headroom-bypass", "x-headroom-user-id", "header-2"]
+    assert list(stripped.keys()) == [
+        "header-1",
+        "x-headroom-bypass",
+        "x-headroom-user-id",
+        "header-2",
+    ]
     assert stripped == {
         "header-1": "val1",
         "x-headroom-bypass": "true",
@@ -169,6 +174,8 @@ def test_drop_proxy_token_authorization() -> None:
         "h2": "v2",
         "h3": "v3",
     }
-    assert list(drop_proxy_token_authorization(ordered, "my-proxy-token").keys()) == ["h1", "h2", "h3"]
-
-
+    assert list(drop_proxy_token_authorization(ordered, "my-proxy-token").keys()) == [
+        "h1",
+        "h2",
+        "h3",
+    ]

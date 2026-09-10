@@ -650,7 +650,6 @@ def test_authorization_header_preserved_when_no_proxy_token_configured() -> None
     assert upstream.get("authorization") == "Bearer sk-ant-oat01-token"
 
 
-
 # ---------------------------------------------------------------------------
 # OpenAI Chat Completions parity check
 # ---------------------------------------------------------------------------

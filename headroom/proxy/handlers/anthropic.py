@@ -1206,8 +1206,7 @@ class AnthropicHandlerMixin:
             headers = _strip_internal_headers(headers)
             headers = _drop_proxy_token_authorization(
                 headers,
-                getattr(self.config, "proxy_token", None)
-                or os.environ.get("HEADROOM_PROXY_TOKEN"),
+                getattr(self.config, "proxy_token", None) or os.environ.get("HEADROOM_PROXY_TOKEN"),
             )
             # `upstream_base_url` is the per-request `x-headroom-base-url`
             # override when the client sent one. These headers are secrets, so
@@ -5086,8 +5085,7 @@ class AnthropicHandlerMixin:
         headers = _strip_internal_headers(headers)
         headers = _drop_proxy_token_authorization(
             headers,
-            getattr(self.config, "proxy_token", None)
-            or os.environ.get("HEADROOM_PROXY_TOKEN"),
+            getattr(self.config, "proxy_token", None) or os.environ.get("HEADROOM_PROXY_TOKEN"),
         )
         # Always the configured Anthropic target; no per-request override.
         headers = merge_extra_headers(
@@ -5388,8 +5386,7 @@ class AnthropicHandlerMixin:
         headers = _strip_internal_headers(headers)
         headers = _drop_proxy_token_authorization(
             headers,
-            getattr(self.config, "proxy_token", None)
-            or os.environ.get("HEADROOM_PROXY_TOKEN"),
+            getattr(self.config, "proxy_token", None) or os.environ.get("HEADROOM_PROXY_TOKEN"),
         )
         # Always the configured Anthropic target; no per-request override.
         headers = merge_extra_headers(
@@ -5536,8 +5533,7 @@ class AnthropicHandlerMixin:
         headers = _strip_internal_headers(headers)
         headers = _drop_proxy_token_authorization(
             headers,
-            getattr(self.config, "proxy_token", None)
-            or os.environ.get("HEADROOM_PROXY_TOKEN"),
+            getattr(self.config, "proxy_token", None) or os.environ.get("HEADROOM_PROXY_TOKEN"),
         )
         # Always the configured Anthropic target; no per-request override.
         headers = merge_extra_headers(
