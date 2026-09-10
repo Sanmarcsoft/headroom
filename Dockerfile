@@ -51,11 +51,27 @@ COPY headroom/ headroom/
 # `headroom proxy --backend`, including Bedrock temporary/SSO credentials.
 # Those credentials require botocore (GH #1551), supplied by [bedrock].
 ARG HEADROOM_EXTRAS=proxy,code,bedrock
+# Export pinned dependencies from uv.lock to guarantee reproducible builds
+# matching locked versions, then install the project itself with --no-deps.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    uv pip install --system ".[${HEADROOM_EXTRAS}]"
+    set -eu; \
+    set --; \
+    OLD_IFS="$IFS"; \
+    IFS=','; \
+    for item in $HEADROOM_EXTRAS; do \
+        item=$(printf '%s' "$item" | tr -d '[:space:]'); \
+        if [ -n "$item" ]; then \
+            set -- "$@" --extra "$item"; \
+        fi; \
+    done; \
+    IFS="$OLD_IFS"; \
+    uv export --frozen --no-dev --no-emit-project --no-hashes "$@" -o /tmp/requirements.txt; \
+    uv pip install --system -r /tmp/requirements.txt; \
+    uv pip install --system --no-deps .; \
+    rm -f /tmp/requirements.txt
 
 RUN --mount=type=bind,source=.,target=/context,readonly \
     HEADROOM_BUILD_VERSION="${HEADROOM_BUILD_VERSION}" PYTHON_SITE_PACKAGES="${PYTHON_SITE_PACKAGES}" python - <<'PY'
