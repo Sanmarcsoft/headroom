@@ -73,6 +73,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-deps .; \
     rm -f /tmp/requirements.txt
 
+# Fail the build if the memory vector index cannot load. sqlite-vec 0.1.6
+# shipped a 32-bit vec0.so in its linux aarch64 wheel ("wrong ELF class:
+# ELFCLASS32"): --memory then never initialised, readyz stayed 503, and nothing
+# logged an error. Loading the extension here turns that into a build failure.
+RUN python -c "import sqlite3, sqlite_vec; c = sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c); print('sqlite-vec', c.execute('select vec_version()').fetchone()[0])"
+
 RUN --mount=type=bind,source=.,target=/context,readonly \
     HEADROOM_BUILD_VERSION="${HEADROOM_BUILD_VERSION}" PYTHON_SITE_PACKAGES="${PYTHON_SITE_PACKAGES}" python - <<'PY'
 import hashlib

@@ -91,7 +91,7 @@ proxy = [
     "onnxruntime>=1.16.0,<1.24.0; python_version<'3.11'",
     "transformers>=5.5.0,<6.0",   # Tokenizer only (for Kompress)
     "watchdog>=4.0.0",            # File watcher for live code graph reindexing (--code-graph)
-    "sqlite-vec>=0.1.6",          # Vector index for memory (--memory). Lightweight, no torch.
+    "sqlite-vec>=0.1.9",          # Vector index for memory (--memory). Lightweight, no torch.
 ]
 # Production ASGI/WSGI server — Unix-only (gunicorn does not support Windows).
 # Kept separate from [proxy] so that dev, CI, and Windows users are not forced
@@ -131,7 +131,7 @@ ml = [
 # in the [vector] extra below; installing it here would make `[all]` (which pulls
 # [memory]) fail on any machine without a compiler — see #1368.
 memory = [
-    "sqlite-vec>=0.1.6",
+    "sqlite-vec>=0.1.9",
     "sentence-transformers>=2.2.0,<6.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
 ]
 # Optional HNSW vector backend. Needs a C++ toolchain to build hnswlib, so it is
@@ -305,7 +305,7 @@ dev = [
     "ollama>=0.4.0",
     "langchain-ollama>=0.2.0",
     "hnswlib>=0.8.0",
-    "sqlite-vec>=0.1.6",
+    "sqlite-vec>=0.1.9",
     "sentence-transformers>=2.2.0,<6.0",
     "numpy>=1.24.0",
     "openpyxl>=3.1.0",  # exercises spreadsheet_ingest (.xlsx) in the test suite
