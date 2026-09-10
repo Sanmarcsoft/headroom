@@ -318,6 +318,7 @@ See [Metrics](/docs/metrics) for the Prometheus and Grafana setup.
 | Flag / env | Default | Effect |
 |---|---|---|
 | `--embedding-server` / `HEADROOM_EMBEDDING_SERVER` | off | Share one ONNX embedder across workers (~600 MB RSS saved). |
+| `--embedding-server-socket` / `HEADROOM_EMBEDDING_SERVER_SOCKET` | `${XDG_RUNTIME_DIR}/headroom/embed-{port}.sock` or `${TMPDIR:-/tmp}/headroom-<uid>/embed-{port}.sock` | Unix socket path for the embedding server sidecar. |
 | `--compression-max-workers` / `HEADROOM_COMPRESSION_MAX_WORKERS` | CPU count | Bound the CPU-bound compression threadpool. |
 
 <Callout type="info" title="Full JSON config">

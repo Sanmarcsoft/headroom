@@ -77,9 +77,11 @@ from headroom.proxy.ccr_marker_policy import (
 from headroom.proxy.ccr_session_tracker import SessionCcrTracker as _SessionCcrTracker
 from headroom.proxy.internal_header_policy import (
     INTERNAL_HEADER_PREFIX,
+    PROXY_TOKEN_HEADER,
     STRIP_INTERNAL_HEADERS_DEFAULT,
     STRIP_INTERNAL_HEADERS_ENV,
     StripInternalHeadersMode,
+    drop_proxy_token_authorization,
     resolve_strip_internal_headers_mode,
     strip_internal_headers,
 )
@@ -1630,8 +1632,10 @@ def is_anthropic_auth(headers: dict[str, str]) -> bool:
 # request-side headers.
 
 _INTERNAL_HEADER_PREFIX = INTERNAL_HEADER_PREFIX
+_PROXY_TOKEN_HEADER = PROXY_TOKEN_HEADER
 _STRIP_INTERNAL_HEADERS_ENV = STRIP_INTERNAL_HEADERS_ENV
 _STRIP_INTERNAL_HEADERS_DEFAULT = STRIP_INTERNAL_HEADERS_DEFAULT
+_drop_proxy_token_authorization = drop_proxy_token_authorization
 
 
 def get_strip_internal_headers_mode() -> StripInternalHeadersMode:

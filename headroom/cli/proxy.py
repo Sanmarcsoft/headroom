@@ -2,7 +2,9 @@
 
 import logging
 import os
+import stat
 import sys
+import tempfile
 import warnings
 from importlib import import_module
 from pathlib import Path
@@ -193,6 +195,74 @@ def _get_env_float_optional(name: str) -> float | None:
         return float(val)
     except ValueError:
         raise click.ClickException(f"{name} must be a number, got {val!r}") from None
+
+
+def default_embed_socket_path(port: int) -> str:
+    """Return the default Unix socket path for the embedding server sidecar.
+
+    Default directory:
+    - ${XDG_RUNTIME_DIR}/headroom when XDG_RUNTIME_DIR is set and non-empty.
+    - Else ${TMPDIR or /tmp}/headroom-<uid> using tempfile.gettempdir() and os.getuid().
+    Socket file inside it: embed-{port}.sock.
+
+    On POSIX systems, creates the directory with mode 0o700 if absent, and verifies
+    via os.lstat that the directory is a real directory (not a symlink), owned by the
+    current UID, and has no group or world write bits set (mode & 0o022 == 0).
+    """
+    if not hasattr(os, "getuid"):
+        # Non-POSIX systems (e.g. Windows) lack os.getuid() and standard Unix domain
+        # socket support; fall back to temporary directory without POSIX uid/mode checks.
+        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if xdg_runtime:
+            socket_dir = os.path.join(xdg_runtime, "headroom")
+        else:
+            socket_dir = os.path.join(tempfile.gettempdir(), "headroom")
+        os.makedirs(socket_dir, exist_ok=True)
+        return os.path.join(socket_dir, f"embed-{port}.sock")
+
+    uid = os.getuid()
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg_runtime:
+        socket_dir = os.path.join(xdg_runtime, "headroom")
+    else:
+        socket_dir = os.path.join(tempfile.gettempdir(), f"headroom-{uid}")
+
+    try:
+        stat_info = os.lstat(socket_dir)
+        dir_existed = True
+    except FileNotFoundError:
+        dir_existed = False
+
+    if not dir_existed:
+        try:
+            os.makedirs(socket_dir, mode=0o700, exist_ok=True)
+            os.chmod(socket_dir, 0o700)
+            stat_info = os.lstat(socket_dir)
+        except OSError as exc:
+            raise click.ClickException(
+                f"Failed to create embedding server socket directory '{socket_dir}': {exc}"
+            ) from exc
+
+    if stat.S_ISLNK(stat_info.st_mode):
+        raise click.ClickException(
+            f"Embedding server socket directory '{socket_dir}' is a symlink; expected a real directory"
+        )
+    if not stat.S_ISDIR(stat_info.st_mode):
+        raise click.ClickException(
+            f"Embedding server socket directory '{socket_dir}' is not a directory"
+        )
+    if stat_info.st_uid != uid:
+        raise click.ClickException(
+            f"Embedding server socket directory '{socket_dir}' is owned by UID {stat_info.st_uid}, "
+            f"expected UID {uid}"
+        )
+    if stat_info.st_mode & 0o022 != 0:
+        raise click.ClickException(
+            f"Embedding server socket directory '{socket_dir}' has insecure permissions "
+            f"(mode {oct(stat_info.st_mode & 0o777)} has group or world write bits set, expected 0o700)"
+        )
+
+    return os.path.join(socket_dir, f"embed-{port}.sock")
 
 
 @main.command()
@@ -1002,7 +1072,8 @@ def dashboard(port: int, no_open: bool) -> None:
     "--embedding-server-socket",
     default=None,
     help="Unix socket path for the embedding server sidecar. "
-    "Default: /tmp/headroom-embed-{port}.sock. "
+    "Default: ${XDG_RUNTIME_DIR}/headroom/embed-{port}.sock or "
+    "${TMPDIR:-/tmp}/headroom-<uid>/embed-{port}.sock. "
     "(env: HEADROOM_EMBEDDING_SERVER_SOCKET)",
 )
 @click.option(
@@ -1616,8 +1687,10 @@ Memory (Multi-Provider):
     code_aware_line = f"  Code-Aware:   {_get_code_aware_banner_status(config)}"
 
     # Performance tuning section — only shown when at least one tuning var is active.
-    _embed_socket = os.environ.get("HEADROOM_EMBEDDING_SERVER_SOCKET") or (
-        embedding_server and (embedding_server_socket or f"/tmp/headroom-embed-{port}.sock")
+    _embed_socket = (
+        embedding_server_socket
+        or os.environ.get("HEADROOM_EMBEDDING_SERVER_SOCKET")
+        or (embedding_server and default_embed_socket_path(port))
     )
     _tuning_lines: list[str] = []
     if _embed_socket:
@@ -1686,7 +1759,11 @@ Press Ctrl+C to stop.
     # -----------------------------------------------------------------------
     _embed_watchdog = None
     if embedding_server:
-        _embed_socket = embedding_server_socket or f"/tmp/headroom-embed-{config.port}.sock"
+        _embed_socket = (
+            embedding_server_socket
+            or os.environ.get("HEADROOM_EMBEDDING_SERVER_SOCKET")
+            or default_embed_socket_path(config.port)
+        )
         # Pass socket path to all worker processes via environment variable
         os.environ["HEADROOM_EMBEDDING_SERVER_SOCKET"] = _embed_socket
         click.echo(f"  Embedding server: starting sidecar on {_embed_socket}...")

@@ -51,11 +51,33 @@ COPY headroom/ headroom/
 # `headroom proxy --backend`, including Bedrock temporary/SSO credentials.
 # Those credentials require botocore (GH #1551), supplied by [bedrock].
 ARG HEADROOM_EXTRAS=proxy,code,bedrock
+# Export pinned dependencies from uv.lock to guarantee reproducible builds
+# matching locked versions, then install the project itself with --no-deps.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    uv pip install --system ".[${HEADROOM_EXTRAS}]"
+    set -eu; \
+    set --; \
+    OLD_IFS="$IFS"; \
+    IFS=','; \
+    for item in $HEADROOM_EXTRAS; do \
+        item=$(printf '%s' "$item" | tr -d '[:space:]'); \
+        if [ -n "$item" ]; then \
+            set -- "$@" --extra "$item"; \
+        fi; \
+    done; \
+    IFS="$OLD_IFS"; \
+    uv export --frozen --no-dev --no-emit-project --no-hashes "$@" -o /tmp/requirements.txt; \
+    uv pip install --system -r /tmp/requirements.txt; \
+    uv pip install --system --no-deps .; \
+    rm -f /tmp/requirements.txt
+
+# Fail the build if the memory vector index cannot load. sqlite-vec 0.1.6
+# shipped a 32-bit vec0.so in its linux aarch64 wheel ("wrong ELF class:
+# ELFCLASS32"): --memory then never initialised, readyz stayed 503, and nothing
+# logged an error. Loading the extension here turns that into a build failure.
+RUN python -c "import sqlite3, sqlite_vec; c = sqlite3.connect(':memory:'); c.enable_load_extension(True); sqlite_vec.load(c); print('sqlite-vec', c.execute('select vec_version()').fetchone()[0])"
 
 RUN --mount=type=bind,source=.,target=/context,readonly \
     HEADROOM_BUILD_VERSION="${HEADROOM_BUILD_VERSION}" PYTHON_SITE_PACKAGES="${PYTHON_SITE_PACKAGES}" python - <<'PY'
