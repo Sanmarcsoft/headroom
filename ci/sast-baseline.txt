@@ -36,11 +36,11 @@
 # x-headroom-proxy-token into proxy.log in plaintext. Fixed in
 # wire_debug_redaction_policy.py. Treat the sampling claim below as a sample,
 # not a proof.
-python-logger-credential-disclosure  31  # logs exit codes, exception text, paths, URLs, token counts, TTLs and scopes; reviewed all 31 on the 0.37.0 sync, none logs a credential value. The Copilot ones pass _token_kind(), which returns a redacted 'ghs_***' style label by construction.
+python-logger-credential-disclosure  33  # 2026-09-21 +2: ccr/mcp_server.py warns when the proxy rejects the configured token, logging the HTTP status and the proxy URL, never the value (the client keeps the header; the warning has no access to it). Older 31: logs exit codes, exception text, paths, URLs, token counts, TTLs and scopes; reviewed all 31 on the 0.37.0 sync, none logs a credential value. The Copilot ones pass _token_kind(), which returns a redacted 'ghs_***' style label by construction.
 
 # os.chmod(dir, 0o700) is owner-only, which is the outcome the rule exists to
 # get you to. It is written to catch 0o777 and does not check the mode it found.
-insecure-file-permissions  3  # all three are os.chmod(..., 0o700), the restrictive setting the rule wants: astgrep.py, probe_recorder.py, and the per-user embed socket dir in cli/proxy.py
+insecure-file-permissions  4  # all four are os.chmod(..., 0o700), the restrictive setting the rule wants: astgrep.py, probe_recorder.py, the per-user embed socket dir in cli/proxy.py, and the proxy log dir in proxy/helpers.py _setup_file_logging (2026-09-21, R5 from #62)
 
 # A fetch to http://127.0.0.1:8787 inside transport.test.ts, against the test
 # server the same file starts. Loopback plaintext in a test is not a finding.
