@@ -492,3 +492,222 @@ def test_run_stdio_reaps_process_on_parent_death(monkeypatch) -> None:
 
     assert excinfo.value.args[0] == 0
     assert cleaned["done"] is True
+
+
+# --- Proxy token authentication --------------------------------------------
+# The sidecar gates /v1/* and /stats behind HEADROOM_PROXY_TOKEN. Without a
+# token on the client the MCP server's retrieve and stats calls come back 401,
+# and _fetch_full_proxy_stats swallowed that as "no proxy data", so a
+# misconfigured token looked exactly like a proxy with nothing to report.
+
+
+class _RecordingResponse:
+    def __init__(self, status_code: int, payload: dict[str, object]) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.text = ""
+
+    def json(self) -> dict[str, object]:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise AssertionError(f"unexpected HTTP {self.status_code}")
+
+
+class _RecordingClient:
+    """Stand-in for httpx.AsyncClient that records construction and calls."""
+
+    instances: list[_RecordingClient] = []
+
+    def __init__(self, *, timeout: float, headers: dict[str, str] | None = None) -> None:
+        self.timeout = timeout
+        self.headers = headers
+        self.calls: list[tuple[str, str]] = []
+        self.status_code = 200
+        self.payload: dict[str, object] = {}
+        _RecordingClient.instances.append(self)
+
+    async def post(self, url: str, json: dict[str, str] | None = None) -> _RecordingResponse:
+        self.calls.append(("POST", url))
+        return _RecordingResponse(self.status_code, self.payload)
+
+    async def get(self, url: str) -> _RecordingResponse:
+        self.calls.append(("GET", url))
+        return _RecordingResponse(self.status_code, self.payload)
+
+
+@pytest.fixture
+def recording_client(monkeypatch: pytest.MonkeyPatch):
+    _RecordingClient.instances = []
+    monkeypatch.setattr(mcp_server.httpx, "AsyncClient", _RecordingClient)
+    return _RecordingClient
+
+
+def test_proxy_token_from_env_is_sent_on_retrieve(
+    monkeypatch: pytest.MonkeyPatch, recording_client
+) -> None:
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN", "s3cret-token")
+    server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=False)
+
+    asyncio.run(server._retrieve_via_proxy("abc123"))
+
+    client = recording_client.instances[-1]
+    assert client.headers == {"X-Headroom-Proxy-Token": "s3cret-token"}
+    assert client.calls == [("POST", "http://headroom:8787/v1/retrieve")]
+
+
+def test_proxy_token_from_file_is_sent_on_stats(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, recording_client
+) -> None:
+    token_file = tmp_path / "proxy-token"
+    token_file.write_text("file-token\n", encoding="utf-8")
+    monkeypatch.delenv("HEADROOM_PROXY_TOKEN", raising=False)
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN_FILE", str(token_file))
+    server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=False)
+
+    asyncio.run(server._fetch_full_proxy_stats())
+
+    client = recording_client.instances[-1]
+    assert client.headers == {"X-Headroom-Proxy-Token": "file-token"}
+    assert client.calls == [("GET", "http://headroom:8787/stats")]
+
+
+def test_env_token_wins_over_token_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, recording_client
+) -> None:
+    token_file = tmp_path / "proxy-token"
+    token_file.write_text("file-token", encoding="utf-8")
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN", "env-token")
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN_FILE", str(token_file))
+    server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=False)
+
+    asyncio.run(server._fetch_full_proxy_stats())
+
+    assert recording_client.instances[-1].headers == {"X-Headroom-Proxy-Token": "env-token"}
+
+
+def test_no_token_configured_sends_no_auth_header(
+    monkeypatch: pytest.MonkeyPatch, recording_client
+) -> None:
+    monkeypatch.delenv("HEADROOM_PROXY_TOKEN", raising=False)
+    monkeypatch.delenv("HEADROOM_PROXY_TOKEN_FILE", raising=False)
+    server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=False)
+
+    asyncio.run(server._fetch_full_proxy_stats())
+
+    assert recording_client.instances[-1].headers is None
+
+
+def test_blank_token_file_is_treated_as_no_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, recording_client
+) -> None:
+    token_file = tmp_path / "proxy-token"
+    token_file.write_text("   \n", encoding="utf-8")
+    monkeypatch.delenv("HEADROOM_PROXY_TOKEN", raising=False)
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN_FILE", str(token_file))
+    server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=False)
+
+    asyncio.run(server._fetch_full_proxy_stats())
+
+    assert recording_client.instances[-1].headers is None
+
+
+def test_missing_token_file_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, recording_client
+) -> None:
+    monkeypatch.delenv("HEADROOM_PROXY_TOKEN", raising=False)
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN_FILE", str(tmp_path / "absent"))
+
+    server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=False)
+
+    assert server.proxy_token is None
+
+
+def test_explicit_proxy_token_argument_wins_over_environment(
+    monkeypatch: pytest.MonkeyPatch, recording_client
+) -> None:
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN", "env-token")
+    server = mcp_server.HeadroomMCPServer(
+        proxy_url="http://headroom:8787",
+        check_proxy=False,
+        proxy_token="explicit-token",
+    )
+
+    asyncio.run(server._fetch_full_proxy_stats())
+
+    assert recording_client.instances[-1].headers == {"X-Headroom-Proxy-Token": "explicit-token"}
+
+
+def test_rejected_token_surfaces_in_stats_instead_of_silence(
+    monkeypatch: pytest.MonkeyPatch, recording_client, fresh_store
+) -> None:
+    """A 401 from /stats must be visible, not an absent proxy section."""
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN", "wrong-token")
+    server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=True)
+
+    async def unauthorized_stats() -> dict[str, object] | None:
+        server._proxy_auth_error = mcp_server._PROXY_UNAUTHORIZED
+        return None
+
+    server._fetch_full_proxy_stats = unauthorized_stats  # type: ignore[method-assign]
+
+    response = asyncio.run(server._handle_stats())
+    payload = json.loads(response[0].kwargs["text"])
+
+    assert payload["proxy"]["status"] == "unauthorized"
+    assert payload["proxy"]["url"] == "http://headroom:8787"
+    assert "token" in payload["warning"].lower()
+    assert "wrong-token" not in json.dumps(payload)
+
+
+def test_stats_401_records_the_auth_error(
+    monkeypatch: pytest.MonkeyPatch, recording_client
+) -> None:
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN", "wrong-token")
+    server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=False)
+    recording_client.instances.clear()
+
+    async def run() -> dict[str, object] | None:
+        result = await server._fetch_full_proxy_stats()
+        return result
+
+    # First call constructs the client; set the status it will answer with.
+    server._http_client = recording_client(timeout=15.0, headers=server._auth_headers() or None)
+    server._http_client.status_code = 401
+
+    assert asyncio.run(run()) is None
+    assert server._proxy_auth_error == mcp_server._PROXY_UNAUTHORIZED
+
+
+def test_retrieve_records_auth_rejection_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch, recording_client
+) -> None:
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN", "wrong-token")
+    server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=True)
+    client = recording_client(timeout=15.0, headers=server._auth_headers() or None)
+    client.status_code = 401
+    server._http_client = client  # type: ignore[assignment]
+
+    result = asyncio.run(server._retrieve_via_proxy("abc123"))
+
+    assert result["error"] == mcp_server._PROXY_UNAUTHORIZED
+    assert server._proxy_auth_error == mcp_server._PROXY_UNAUTHORIZED
+
+
+def test_retrieve_miss_after_auth_rejection_says_so(
+    monkeypatch: pytest.MonkeyPatch, recording_client, fresh_store
+) -> None:
+    """A rejected token must not read as 'your content expired'."""
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN", "wrong-token")
+    monkeypatch.setattr(mcp_server, "HTTPX_AVAILABLE", True)
+    server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=True)
+    client = recording_client(timeout=15.0, headers=server._auth_headers() or None)
+    client.status_code = 401
+    server._http_client = client  # type: ignore[assignment]
+
+    result = asyncio.run(server._retrieve_content("absent_hash"))
+
+    assert result["proxy"]["status"] == mcp_server._PROXY_UNAUTHORIZED
+    assert "token" in result["error"].lower()
+    assert "wrong-token" not in json.dumps(result)

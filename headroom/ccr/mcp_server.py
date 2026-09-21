@@ -70,6 +70,17 @@ except ImportError:
     HTTPX_AVAILABLE = False
     httpx = None  # type: ignore[assignment]
 
+# Proxy token auth. The proxy gates /v1/* and /stats behind HEADROOM_PROXY_TOKEN
+# (only the health endpoints are exempt; loopback is gated too unless the proxy
+# sets HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK), so a client that sends
+# no token gets 401 on both retrieve and stats. The token is read from the
+# environment, or from a file for deployments that would rather not put a secret
+# in a process environment. Never log the value.
+_PROXY_TOKEN_HEADER = "X-Headroom-Proxy-Token"
+_PROXY_TOKEN_ENV = "HEADROOM_PROXY_TOKEN"
+_PROXY_TOKEN_FILE_ENV = "HEADROOM_PROXY_TOKEN_FILE"
+_PROXY_UNAUTHORIZED = "unauthorized"
+
 CCR_TOOL_NAME = "headroom_retrieve"
 COMPRESS_TOOL_NAME = "headroom_compress"
 STATS_TOOL_NAME = "headroom_stats"
@@ -88,6 +99,31 @@ _READ_ENABLED = os.environ.get("HEADROOM_MCP_READ", "off").lower().strip() in (
 )
 
 DEFAULT_PROXY_URL = os.environ.get("HEADROOM_PROXY_URL", "http://127.0.0.1:8787")
+
+
+def _resolve_proxy_token() -> str | None:
+    """Read the proxy token from the environment, or from a file.
+
+    ``HEADROOM_PROXY_TOKEN`` wins over ``HEADROOM_PROXY_TOKEN_FILE``. A blank
+    value, a missing file or an unreadable one all mean "no token": the server
+    still runs and still compresses locally, it just cannot reach a gated
+    proxy. Failures are logged without the value.
+    """
+    token = os.environ.get(_PROXY_TOKEN_ENV, "").strip()
+    if token:
+        return token
+
+    token_path = os.environ.get(_PROXY_TOKEN_FILE_ENV, "").strip()
+    if not token_path:
+        return None
+
+    try:
+        token = Path(token_path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.warning("Cannot read %s=%s: %s", _PROXY_TOKEN_FILE_ENV, token_path, exc)
+        return None
+    return token or None
+
 
 # How often the parent-death watchdog polls os.getppid() (seconds). When the
 # launching MCP client is SIGKILLed, stdin EOF may never arrive and the SDK's
@@ -371,9 +407,12 @@ class HeadroomMCPServer:
         self,
         proxy_url: str = DEFAULT_PROXY_URL,
         check_proxy: bool = True,
+        proxy_token: str | None = None,
     ):
         self.proxy_url = proxy_url
         self.check_proxy = check_proxy
+        self.proxy_token = proxy_token if proxy_token is not None else _resolve_proxy_token()
+        self._proxy_auth_error: str | None = None
         self._http_client: httpx.AsyncClient | None = None  # type: ignore[assignment]
         self._stats = SessionStats()
         self._local_store: Any = None  # Lazy-initialized CompressionStore
@@ -525,6 +564,20 @@ class HeadroomMCPServer:
                 ),
             }
 
+        if self._proxy_auth_error == _PROXY_UNAUTHORIZED:
+            # Distinguish "the proxy would not talk to us" from "your content
+            # is gone", which are the same message to a caller otherwise.
+            return {
+                "error": (
+                    f"Not found locally, and proxy {self.proxy_url} rejected the configured "
+                    f"token, so its store could not be searched. Set {_PROXY_TOKEN_ENV} or "
+                    f"{_PROXY_TOKEN_FILE_ENV} for this MCP server."
+                ),
+                "hash": hash_key,
+                "proxy": {"status": _PROXY_UNAUTHORIZED, "url": self.proxy_url},
+                "hint": "Fix the proxy token, then retry. The content may still be there.",
+            }
+
         return {
             "error": "Content not found. It may have expired or the hash may be incorrect.",
             "hash": hash_key,
@@ -535,21 +588,44 @@ class HeadroomMCPServer:
             "compressed by the proxy uses the configured CCR TTL.",
         }
 
+    def _auth_headers(self) -> dict[str, str]:
+        """Headers that authenticate this client to a token-gated proxy."""
+        if not self.proxy_token:
+            return {}
+        return {_PROXY_TOKEN_HEADER: self.proxy_token}
+
+    def _get_http_client(self) -> Any:
+        """Lazily build the shared proxy client, carrying the token if configured."""
+        if self._http_client is None:
+            headers = self._auth_headers()
+            self._http_client = httpx.AsyncClient(timeout=15.0, headers=headers or None)
+        return self._http_client
+
     async def _retrieve_via_proxy(
         self,
         hash_key: str,
     ) -> dict[str, Any]:
         """Retrieve full content by hash via proxy's HTTP endpoint."""
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=15.0)
+        client = self._get_http_client()
 
         url = f"{self.proxy_url}/v1/retrieve"
         payload: dict[str, str] = {"hash": hash_key}
 
-        response = await self._http_client.post(url, json=payload)
+        response = await client.post(url, json=payload)
 
         if response.status_code == 404:
             return {"error": "Not found in proxy store", "hash": hash_key}
+
+        if response.status_code in (401, 403):
+            # Record it: the caller swallows exceptions from this path, so a
+            # raise here would surface as an ordinary retrieval miss.
+            self._proxy_auth_error = _PROXY_UNAUTHORIZED
+            logger.warning(
+                "Proxy rejected the configured token (HTTP %s) on %s/v1/retrieve",
+                response.status_code,
+                self.proxy_url,
+            )
+            return {"error": _PROXY_UNAUTHORIZED, "hash": hash_key}
 
         response.raise_for_status()
         result: dict[str, Any] = response.json()
@@ -900,6 +976,18 @@ class HeadroomMCPServer:
                 proxy_stats = self._extract_proxy_stats(proxy_data)
                 if proxy_stats:
                     stats["proxy"] = proxy_stats
+            elif self._proxy_auth_error == _PROXY_UNAUTHORIZED:
+                warning = (
+                    f"Proxy {self.proxy_url} rejected the configured token. Set "
+                    f"{_PROXY_TOKEN_ENV} or {_PROXY_TOKEN_FILE_ENV} for this MCP server; "
+                    "proxy stats and proxy-side retrieval stay unavailable until it matches."
+                )
+                stats["proxy"] = {
+                    "status": _PROXY_UNAUTHORIZED,
+                    "url": self.proxy_url,
+                    "warning": warning,
+                }
+                stats["warning"] = warning
             else:
                 proxy_status = await self._probe_proxy_unreachable()
                 if proxy_status:
@@ -909,13 +997,25 @@ class HeadroomMCPServer:
         return [TextContent(type="text", text=json.dumps(stats, indent=2, ensure_ascii=False))]
 
     async def _fetch_full_proxy_stats(self) -> dict[str, Any] | None:
-        """Fetch full stats from the proxy (includes summary)."""
+        """Fetch full stats from the proxy (includes summary).
+
+        A 401/403 is recorded rather than swallowed: a rejected token used to
+        look identical to a proxy with nothing to report.
+        """
         try:
-            if self._http_client is None:
-                self._http_client = httpx.AsyncClient(timeout=15.0)
-            response = await self._http_client.get(f"{self.proxy_url}/stats")
+            client = self._get_http_client()
+            response = await client.get(f"{self.proxy_url}/stats")
+            if response.status_code in (401, 403):
+                self._proxy_auth_error = _PROXY_UNAUTHORIZED
+                logger.warning(
+                    "Proxy rejected the configured token (HTTP %s) on %s/stats",
+                    response.status_code,
+                    self.proxy_url,
+                )
+                return None
             if response.status_code != 200:
                 return None
+            self._proxy_auth_error = None
             result: dict[str, Any] = response.json()
             return result
         except Exception:
@@ -1146,17 +1246,20 @@ class HeadroomMCPServer:
 def create_ccr_mcp_server(
     proxy_url: str = DEFAULT_PROXY_URL,
     direct_mode: bool = False,
+    proxy_token: str | None = None,
 ) -> HeadroomMCPServer:
     """Create a Headroom MCP server instance.
 
     Args:
         proxy_url: URL of the Headroom proxy server (for retrieval fallback).
         direct_mode: Ignored (kept for backward compatibility).
+        proxy_token: Token for a gated proxy. Defaults to the environment
+            (``HEADROOM_PROXY_TOKEN`` or ``HEADROOM_PROXY_TOKEN_FILE``).
 
     Returns:
         HeadroomMCPServer instance.
     """
-    return HeadroomMCPServer(proxy_url=proxy_url)
+    return HeadroomMCPServer(proxy_url=proxy_url, proxy_token=proxy_token)
 
 
 async def main() -> None:
