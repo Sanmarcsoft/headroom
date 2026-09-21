@@ -528,6 +528,128 @@ def test_disabled_mode_passes_through_e2e(
     assert upstream.get("x-headroom-mode") == "passthrough"
 
 
+def test_disabled_mode_strips_proxy_token_e2e(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`HEADROOM_STRIP_INTERNAL_HEADERS=disabled` still removes x-headroom-proxy-token."""
+    monkeypatch.setenv("HEADROOM_STRIP_INTERNAL_HEADERS", "disabled")
+    client, transport = _make_anthropic_app()
+    resp = client.post(
+        "/v1/messages",
+        headers={
+            "x-api-key": "test-key",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+            "x-headroom-mode": "passthrough",
+            "X-Headroom-Proxy-Token": "secret-proxy-token",
+        },
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert transport.captured_headers is not None
+    upstream = {k.lower(): v for k, v in transport.captured_headers.items()}
+    # x-headroom-mode passes through in disabled mode
+    assert upstream.get("x-headroom-mode") == "passthrough"
+    # But proxy token is NEVER forwarded upstream
+    assert "x-headroom-proxy-token" not in upstream
+
+
+def test_proxy_token_in_authorization_header_dropped_upstream() -> None:
+    """Authorization header matching configured proxy token must not be sent upstream."""
+    client, transport = _make_anthropic_app(proxy_token="my-proxy-token")
+    resp = client.post(
+        "/v1/messages",
+        headers={
+            "Authorization": "Bearer my-proxy-token",
+            "x-api-key": "test-key",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert transport.captured_headers is not None
+    upstream = {k.lower(): v for k, v in transport.captured_headers.items()}
+    assert upstream.get("x-api-key") == "test-key"
+    assert "authorization" not in upstream
+
+
+def test_genuine_oauth_authorization_header_preserved_upstream() -> None:
+    """Genuine Anthropic OAuth Authorization header must be forwarded upstream."""
+    client, transport = _make_anthropic_app(proxy_token="my-proxy-token")
+    resp = client.post(
+        "/v1/messages",
+        headers={
+            "x-headroom-proxy-token": "my-proxy-token",
+            "Authorization": "Bearer sk-ant-oat01-genuine-oauth-token",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert transport.captured_headers is not None
+    upstream = {k.lower(): v for k, v in transport.captured_headers.items()}
+    assert upstream.get("authorization") == "Bearer sk-ant-oat01-genuine-oauth-token"
+
+
+def test_proxy_token_in_authorization_case_variants_dropped_upstream() -> None:
+    """Case variants of Authorization and Bearer matching proxy token must be dropped."""
+    client, transport = _make_anthropic_app(proxy_token="my-proxy-token")
+    resp = client.post(
+        "/v1/messages",
+        headers={
+            "authorization": "bearer my-proxy-token",
+            "x-api-key": "test-key",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert transport.captured_headers is not None
+    upstream = {k.lower(): v for k, v in transport.captured_headers.items()}
+    assert "authorization" not in upstream
+
+
+def test_authorization_header_preserved_when_no_proxy_token_configured() -> None:
+    """When no proxy token is configured, Authorization header is not dropped."""
+    client, transport = _make_anthropic_app()  # proxy_token not configured
+    resp = client.post(
+        "/v1/messages",
+        headers={
+            "Authorization": "Bearer sk-ant-oat01-token",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert transport.captured_headers is not None
+    upstream = {k.lower(): v for k, v in transport.captured_headers.items()}
+    assert upstream.get("authorization") == "Bearer sk-ant-oat01-token"
+
+
 # ---------------------------------------------------------------------------
 # OpenAI Chat Completions parity check
 # ---------------------------------------------------------------------------

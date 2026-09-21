@@ -357,6 +357,52 @@ class TestSetupFileLogging:
         has_rotating = any(isinstance(h, RotatingFileHandler) for h in headroom_logger.handlers)
         assert has_rotating, "Expected a RotatingFileHandler to be registered"
 
+    def test_log_dir_and_log_files_are_owner_only(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The log dir is 0700 and every proxy.log* file is 0600.
+
+        Found in production on 2026-09-10: proxy.log was 0644 under the default
+        umask, and it held 48 plaintext copies of the proxy token because the
+        inbound header logger was not redacting it. Two independent defects; a
+        log file is not a place for a wide mode.
+        """
+        import logging
+        import stat
+        from logging.handlers import RotatingFileHandler
+
+        from headroom.proxy.helpers import _headroom_log_dir, _setup_file_logging
+
+        monkeypatch.setenv("HEADROOM_WORKSPACE_DIR", str(tmp_path))
+        log_dir = _headroom_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        # A pre-existing world-readable log, as an older build would leave it.
+        stale = log_dir / "proxy.log.1"
+        stale.write_text("old\n")
+        stale.chmod(0o644)
+
+        headroom_logger = logging.getLogger("headroom")
+        headroom_logger.handlers = [
+            h for h in headroom_logger.handlers if not isinstance(h, RotatingFileHandler)
+        ]
+        try:
+            _setup_file_logging()
+            logging.getLogger("headroom.test").info("write something")
+            for handler in headroom_logger.handlers:
+                if isinstance(handler, RotatingFileHandler):
+                    handler.flush()
+        finally:
+            for handler in list(headroom_logger.handlers):
+                if isinstance(handler, RotatingFileHandler):
+                    handler.close()
+                    headroom_logger.removeHandler(handler)
+
+        assert stat.S_IMODE(log_dir.stat().st_mode) == 0o700
+        written = sorted(log_dir.glob("proxy.log*"))
+        assert written, "no log file was created"
+        for path in written:
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
+
     def test_setup_file_logging_handles_oserror(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """_setup_file_logging should not raise on OSError."""
         from headroom.proxy.helpers import _setup_file_logging

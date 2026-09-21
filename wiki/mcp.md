@@ -150,6 +150,26 @@ reads across all of them.
 
 No double-compression: the proxy compresses at the HTTP level (before the LLM sees content). MCP tools operate after the LLM receives content. They don't touch the same data.
 
+#### Reaching a token-gated proxy
+
+A proxy started with `HEADROOM_PROXY_TOKEN` gates `/v1/*` and `/stats` for every caller, loopback included (only the health endpoints are exempt; `HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK=1` on the proxy restores the older loopback exemption). So every MCP server that talks to a gated proxy needs the token, or `headroom_retrieve` falls back to local-only and `headroom_stats` reports local counters without the proxy summary.
+
+Set either variable in the MCP server's `env` block:
+
+```json
+{
+  "mcpServers": {
+    "headroom": {
+      "command": "headroom",
+      "args": ["mcp", "serve", "--proxy-url", "http://headroom-host:8787"],
+      "env": { "HEADROOM_PROXY_TOKEN_FILE": "~/.config/headroom/proxy-token" }
+    }
+  }
+}
+```
+
+`HEADROOM_PROXY_TOKEN` holds the token directly and wins over `HEADROOM_PROXY_TOKEN_FILE`, which names a file to read it from, so the secret can stay out of the host's config and process environment. The token goes out as `X-Headroom-Proxy-Token` and is never logged. If the proxy rejects it, `headroom_stats` returns `proxy.status: unauthorized` instead of quietly dropping the proxy section.
+
 ## CLI Commands
 
 ### Install
@@ -212,6 +232,10 @@ pip install "headroom-ai[mcp]"
 ```bash
 headroom proxy  # In another terminal
 ```
+
+### `proxy.status: unauthorized`, or stats with no proxy section
+
+The proxy is gating `/v1/*` and `/stats` behind `HEADROOM_PROXY_TOKEN` and this MCP server is not sending a token it accepts. Set `HEADROOM_PROXY_TOKEN` or `HEADROOM_PROXY_TOKEN_FILE` in the server's `env` block; see [Reaching a token-gated proxy](#reaching-a-token-gated-proxy). Loopback callers are gated too unless the proxy runs with `HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK=1`.
 
 ### "Entry not found or expired"
 

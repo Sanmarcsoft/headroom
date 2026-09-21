@@ -363,8 +363,10 @@ headroom perf --raw
 | `--hours` | `168.0` | Time window in hours |
 | `--raw` | off | Print raw PERF records instead of the summarized report |
 
-The command reads `${HEADROOM_WORKSPACE_DIR}/logs/proxy.log` (defaults
-to `~/.headroom/logs/proxy.log` — see the
+The command reads each per-port runtime log
+`${HEADROOM_WORKSPACE_DIR}/logs/proxy-<port>.log` (defaults to
+`~/.headroom/logs/`) plus PID-qualified files from multi-worker deployments,
+aggregating them while still reading a legacy `proxy.log` when present — see the
 [Filesystem Contract](filesystem-contract.md)).
 
 ## `headroom inspect`
@@ -630,6 +632,15 @@ headroom mcp serve --proxy-url http://127.0.0.1:9000 --debug
 | `--debug` | off | Enable debug logging |
 
 `serve` is part of the public CLI, but it is usually consumed by MCP host tooling rather than by humans directly.
+
+**Authenticating to a token-gated proxy.** A proxy started with `HEADROOM_PROXY_TOKEN` gates `/v1/*` and `/stats` for every caller, loopback included (unless the proxy sets `HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK=1`), so an MCP server needs the token or `headroom_retrieve` and the proxy half of `headroom_stats` get 401. Give it one of:
+
+| Variable | Meaning |
+|---|---|
+| `HEADROOM_PROXY_TOKEN` | The token itself. Wins over the file. |
+| `HEADROOM_PROXY_TOKEN_FILE` | Path to a file holding the token, for hosts that would rather keep the secret out of a process environment. Leading and trailing whitespace is stripped. |
+
+The token is sent as `X-Headroom-Proxy-Token` and never logged. With no token configured the server still starts and still compresses locally; only the proxy-backed paths are unavailable. A token the proxy rejects is reported: `headroom_stats` returns `proxy.status: unauthorized` and a retrieval miss says so, rather than looking like an ordinary cache miss.
 
 See also: [MCP Tools](mcp.md)
 

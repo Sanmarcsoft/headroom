@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Literal, cast
 
 INTERNAL_HEADER_PREFIX = "x-headroom-"
+PROXY_TOKEN_HEADER = "x-headroom-proxy-token"
 STRIP_INTERNAL_HEADERS_ENV = "HEADROOM_STRIP_INTERNAL_HEADERS"
 StripInternalHeadersMode = Literal["enabled", "disabled"]
 STRIP_INTERNAL_HEADERS_DEFAULT: StripInternalHeadersMode = "enabled"
@@ -32,9 +33,31 @@ def strip_internal_headers(
     """Return a copy of headers with internal x-headroom-* request headers removed."""
 
     if mode == "disabled":
-        return dict(headers)
+        return {key: value for key, value in headers.items() if key.lower() != PROXY_TOKEN_HEADER}
     return {
         key: value
         for key, value in headers.items()
         if not key.lower().startswith(INTERNAL_HEADER_PREFIX)
+    }
+
+
+def drop_proxy_token_authorization(
+    headers: Mapping[str, str],
+    proxy_token: str | None,
+) -> dict[str, str]:
+    """Drop an Authorization header whose bearer value equals the configured proxy token.
+
+    Leaves genuine provider/OAuth Authorization credentials untouched.
+    """
+    if not proxy_token or not proxy_token.strip():
+        return dict(headers)
+    token = proxy_token.strip()
+    return {
+        k: v
+        for k, v in headers.items()
+        if not (
+            k.lower() == "authorization"
+            and v.lower().startswith("bearer ")
+            and v[7:].strip() == token
+        )
     }

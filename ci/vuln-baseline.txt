@@ -75,6 +75,7 @@ GHSA-866g-f22w-33x8  # @ai-sdk/provider-utils 4.0.23, fix 4.0.33. Unbounded reso
 # `--extra all` production export on 2026-09-09 (`uv export --no-dev
 # --extra all` lists 621 packages and none of them is accelerate), which is
 # again why pip-audit reads clean over that set.
+PYSEC-2026-3804  # the SAME accelerate defect as GHSA-4j2p-28q2-5m79 below, published under a second OSV id on 2026-09-10 (aliases: CVE-2026-69112, GHSA-4j2p-28q2-5m79; verified against api.osv.dev on 2026-09-10). Same range, `last_affected: 1.14.0` with 1.14.0 the newest release, so still nothing to upgrade to.
 GHSA-4j2p-28q2-5m79  # accelerate 1.12.0, path traversal and DoS via sharded checkpoint weight_map entries. NO FIX PUBLISHED: OSV changed this record on 2026-09-08 from `fixed: 1.14.0` to `last_affected: 1.14.0`, and 1.14.0 is the newest release, so there is nothing to upgrade to. Upgrading 1.12.0 -> 1.14.0 was tried and reverted for that reason. Opt-in voice-train extra, absent from --extra all.
 
 # chromadb again, three advisories the 0.37.0 sync exposed that are NOT the
