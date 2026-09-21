@@ -273,3 +273,33 @@ def test_startup_warning_not_logged_when_exempt_loopback_unset(
         if "HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK" in r.getMessage()
     ]
     assert len(warnings) == 0
+
+
+def test_inbound_request_log_redacts_the_proxy_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The inbound request logger must never write the proxy token in plaintext.
+
+    Found in production on 2026-09-10: redact_for_wire_debug matched
+    `*_access_token` and `*_refresh_token` but not a bare `*_token`, so every
+    request wrote `x-headroom-proxy-token: <value>` into proxy.log.
+    """
+    secret = "s3cr3t-token"
+    app = _make_app(proxy_token=secret)
+    target = logging.getLogger("headroom.proxy")
+    target.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger="headroom.proxy"):
+            with TestClient(app) as client:
+                client.get("/readyz", headers={"x-headroom-proxy-token": secret})
+    finally:
+        target.removeHandler(caplog.handler)
+
+    inbound = [
+        r.getMessage() for r in caplog.records if "event=proxy_inbound_request" in r.getMessage()
+    ]
+    assert inbound, "the inbound request logger did not run"
+    assert any("x-headroom-proxy-token" in m for m in inbound), "header not logged at all"
+    for message in inbound:
+        assert secret not in message
+        assert '"x-headroom-proxy-token": "[REDACTED]"' in message

@@ -33,8 +33,12 @@ def should_redact_key(key: str) -> bool:
         normalized.endswith("_api_key")
         or normalized.endswith("_secret")
         or normalized.endswith("_password")
-        or normalized.endswith("_access_token")
-        or normalized.endswith("_refresh_token")
+        # Any *_token header, which is what the proxy's own
+        # x-headroom-proxy-token is. The inbound request logger runs every
+        # header through this policy, so a miss here writes the credential
+        # into proxy.log in plaintext. "token_count" is deliberately not
+        # matched: it ends in _count, not _token.
+        or normalized.endswith("_token")
     )
 
 

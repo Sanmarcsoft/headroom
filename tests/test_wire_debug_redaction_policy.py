@@ -43,3 +43,23 @@ def test_wire_debug_key_matching_normalizes_dashes_and_case() -> None:
     assert should_redact_key("Anthropic-API-Key")
     assert should_redact_key("custom-refresh-token")
     assert not should_redact_key("token_count")
+
+
+def test_wire_debug_redacts_the_proxys_own_token_headers() -> None:
+    """The inbound request logger runs every header through this policy.
+
+    `x-headroom-proxy-token` is the credential that authorizes the proxy, so a
+    plaintext copy in proxy.log turns the log file into a credential store.
+    """
+    assert should_redact_key("x-headroom-proxy-token")
+    assert should_redact_key("X-Headroom-Proxy-Token")
+    assert should_redact_key("x-headroom-admin-token")
+
+    redacted = redact_for_wire_debug(
+        {"x-headroom-proxy-token": "deadbeef", "x-headroom-stack": "visible"}
+    )
+
+    assert redacted == {
+        "x-headroom-proxy-token": WIRE_DEBUG_REDACTED,
+        "x-headroom-stack": "visible",
+    }

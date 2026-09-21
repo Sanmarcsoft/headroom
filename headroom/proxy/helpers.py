@@ -9,6 +9,7 @@ Extracted from server.py for maintainability.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -1563,20 +1564,52 @@ def _headroom_log_dir() -> Path:
     return _paths.log_dir()
 
 
+def _owner_only_rotating_handler_class() -> type:
+    """Return a RotatingFileHandler that creates every file mode 0600.
+
+    proxy.log records request metadata, headers and errors. Even fully redacted
+    it is the most sensitive file Headroom writes, and it is exactly the file
+    users are asked to attach to bug reports. Group- and world-readable log
+    files (the default umask gives 0644) widen that to every account on the
+    host and every process sharing the volume.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    class _OwnerOnlyRotatingFileHandler(RotatingFileHandler):
+        def _open(self):  # type: ignore[no-untyped-def]
+            previous = os.umask(0o077)
+            try:
+                stream = super()._open()
+            finally:
+                os.umask(previous)
+            with contextlib.suppress(OSError):
+                os.chmod(self.baseFilename, 0o600)
+            return stream
+
+    return _OwnerOnlyRotatingFileHandler
+
+
 def _setup_file_logging() -> None:
     """Add a RotatingFileHandler to the headroom root logger.
 
     Writes to ~/.headroom/logs/proxy.log with automatic rotation:
     - Rotates at 10 MB
     - Keeps 5 backups (~50 MB max)
+    - Directory 0700, every log file 0600, rotations included
     """
     from logging.handlers import RotatingFileHandler
 
     try:
         log_dir = _headroom_log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            os.chmod(log_dir, 0o700)
         log_path = log_dir / "proxy.log"
-        handler = RotatingFileHandler(
+        # Tighten anything an older build left group- or world-readable.
+        for stale in sorted(log_dir.glob("proxy.log*")):
+            with contextlib.suppress(OSError):
+                os.chmod(stale, 0o600)
+        handler = _owner_only_rotating_handler_class()(
             log_path,
             maxBytes=10 * 1024 * 1024,  # 10 MB
             backupCount=5,
