@@ -1777,9 +1777,9 @@ def _setup_file_logging(
         log_path = _paths.proxy_log_path(port, process_id=process_id)
         # Tighten anything an older build left group- or world-readable,
         # including the per-port and per-worker names and their rotations.
-        for stale in sorted(log_dir.glob("proxy*.log*")):
+        for older in sorted(log_dir.glob("proxy*.log*")):
             with contextlib.suppress(OSError):
-                os.chmod(stale, 0o600)
+                os.chmod(older, 0o600)
         # Attach to the headroom root logger so all sub-loggers are captured.
         # Disable propagation to root to avoid duplicate writes when
         # wrap.py redirects stderr to the same log file.
