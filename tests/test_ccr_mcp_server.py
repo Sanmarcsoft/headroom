@@ -613,6 +613,42 @@ def test_blank_token_file_is_treated_as_no_token(
     assert recording_client.instances[-1].headers is None
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "qz9v-first-line\nsecond-line\n",
+        "qz9v\rsplit\n",
+        "qz9v\tsplit\n",
+        "qz9v-caf\u00e9\n",
+    ],
+    ids=["two-lines", "embedded-cr", "embedded-tab", "non-ascii"],
+)
+def test_token_file_with_control_or_non_ascii_chars_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, recording_client, caplog, content: str
+) -> None:
+    """A malformed token must fail closed, not travel.
+
+    httpx refuses a header value with an embedded newline, and that exception
+    can carry the offending value into a log line, which is the one route the
+    token-file feature was written to close. So the read path rejects
+    anything outside printable ASCII up front and logs only the path.
+    """
+    token_file = tmp_path / "proxy-token"
+    token_file.write_text(content, encoding="utf-8")
+    monkeypatch.delenv("HEADROOM_PROXY_TOKEN", raising=False)
+    monkeypatch.setenv("HEADROOM_PROXY_TOKEN_FILE", str(token_file))
+
+    with caplog.at_level("WARNING", logger=mcp_server.logger.name):
+        server = mcp_server.HeadroomMCPServer(proxy_url="http://headroom:8787", check_proxy=False)
+        asyncio.run(server._fetch_full_proxy_stats())
+
+    assert server.proxy_token is None
+    assert recording_client.instances[-1].headers is None
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert str(token_file) in logged
+    assert "qz9v" not in logged
+
+
 def test_missing_token_file_does_not_raise(
     monkeypatch: pytest.MonkeyPatch, tmp_path, recording_client
 ) -> None:

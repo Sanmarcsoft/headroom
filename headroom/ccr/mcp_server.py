@@ -122,7 +122,30 @@ def _resolve_proxy_token() -> str | None:
     except OSError as exc:
         logger.warning("Cannot read %s=%s: %s", _PROXY_TOKEN_FILE_ENV, token_path, exc)
         return None
-    return token or None
+    if not token:
+        return None
+    if not _is_header_safe_token(token):
+        # Fail closed. httpx refuses a header value with an embedded newline,
+        # and that exception can carry the value into a log line, which is
+        # the one route this feature exists to close. Log the path only.
+        logger.warning(
+            "Ignoring %s=%s: the token contains whitespace, control or non-ASCII "
+            "characters (expected a single line of printable ASCII)",
+            _PROXY_TOKEN_FILE_ENV,
+            token_path,
+        )
+        return None
+    return token
+
+
+def _is_header_safe_token(token: str) -> bool:
+    """True if *token* can travel as an HTTP header value without surprises.
+
+    A single line of printable ASCII with no interior whitespace. Anything
+    else (a second line, a tab, a non-ASCII letter) is refused up front so the
+    value is never handed to the HTTP client.
+    """
+    return token.isascii() and token.isprintable() and " " not in token
 
 
 # How often the parent-death watchdog polls os.getppid() (seconds). When the

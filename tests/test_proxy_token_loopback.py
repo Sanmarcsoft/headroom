@@ -121,6 +121,29 @@ def test_http_loopback_without_token_gets_401_on_v1_path(monkeypatch: pytest.Mon
         assert resp.json() == {"error": "unauthorized"}
 
 
+def test_http_loopback_without_token_gets_401_on_admin_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /admin/runtime-env hot-patches live proxy knobs (upstream 0.37+).
+
+    It declares only loopback and same-origin guards of its own, so the token
+    requirement comes entirely from the fork's _security_gate. Pin it: a
+    loopback caller without the token must be refused before the endpoint's
+    own dependencies run, or HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK would widen
+    from "read the data plane" to "mutate live configuration".
+    """
+    monkeypatch.delenv("HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK", raising=False)
+    app = _make_app(proxy_token="s3cr3t-token")
+    with TestClient(app, base_url="http://127.0.0.1", client=LOOPBACK) as c:
+        resp = c.post(
+            "/admin/runtime-env",
+            json={"HEADROOM_OUTPUT_SHAPER": "0"},
+            headers={"Origin": "http://127.0.0.1"},
+        )
+        assert resp.status_code == 401
+        assert resp.json() == {"error": "unauthorized"}
+
+
 def test_http_loopback_with_correct_token_passes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HEADROOM_PROXY_TOKEN_EXEMPT_LOOPBACK", raising=False)
     app = _make_app(proxy_token="s3cr3t-token")
