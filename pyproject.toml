@@ -379,9 +379,10 @@ constraint-dependencies = [
     "pydantic-settings>=2.14.2",
     # GHSA-hmq2-w58f-27jc, GHSA-jm78-9fvv-mhgr, GHSA-wvpp-8hx9-p66j (High),
     # GHSA-hh9p-6wh2-4mfc (Medium) + earlier ones — transitive via agno.
-    # 3.1.58 clears every GitPython advisory published to date; the previous
+    # 3.1.60 clears PYSEC-2026-3982/3983/3984 (CVE-2026-87817..87819), all on
+    # 3.1.59 (2026-09-21). 3.1.58 had cleared every advisory before those; the previous
     # 3.1.50 floor resolved to 3.1.54, which nine open advisories still cover.
-    "gitpython>=3.1.58",
+    "gitpython>=3.1.60",
     # GHSA-f4xh-w4cj-qxq8 (High) — transitive via langchain-core; fix at 0.8.18
     "langsmith>=0.9.0",
     # CVE-2026-49825 (High, XSS) — transitive via lxml[html-clean]; fix at 0.4.5
