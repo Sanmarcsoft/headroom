@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -853,7 +854,11 @@ def test_openclaw_source_dependency_matches_lockfile_registry_range() -> None:
     source_range = package_json["dependencies"]["headroom-ai"]
     lock_range = package_lock["packages"][""]["dependencies"]["headroom-ai"]
 
-    assert source_range == lock_range == "^0.22.3"
+    assert source_range == lock_range
+    assert re.fullmatch(r"\^\d+\.\d+\.\d+", source_range), source_range
+    assert package_lock["packages"]["node_modules/headroom-ai"]["resolved"].startswith(
+        "https://registry.npmjs.org/headroom-ai/"
+    )
 
 
 def test_opencode_source_dependency_matches_lockfile_registry_range() -> None:
@@ -866,7 +871,11 @@ def test_opencode_source_dependency_matches_lockfile_registry_range() -> None:
     source_range = package_json["dependencies"]["headroom-ai"]
     lock_range = package_lock["packages"][""]["dependencies"]["headroom-ai"]
 
-    assert source_range == lock_range == "^0.22.3"
+    assert source_range == lock_range
+    assert re.fullmatch(r"\^\d+\.\d+\.\d+", source_range), source_range
+    assert package_lock["packages"]["node_modules/headroom-ai"]["resolved"].startswith(
+        "https://registry.npmjs.org/headroom-ai/"
+    )
 
 
 def test_python_release_smoke_imports_installed_wheel_outside_source_tree() -> None:
@@ -962,7 +971,7 @@ def test_pypi_publish_failure_blocks_github_release() -> None:
 
     # SHA-pinned: a mutable tag on a job holding id-token: write is the standard
     # Actions supply-chain vector. The trailing comment keeps the version legible.
-    assert "uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e" in pypi_job
+    assert "uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33" in pypi_job
     assert "continue-on-error: true" not in pypi_job
     assert "(vars.PYPI_SKIP == 'true' || needs.publish-pypi.result == 'success')" in content
 

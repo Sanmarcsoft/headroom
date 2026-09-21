@@ -141,7 +141,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: ">=24.16.0 <25"
 
       - name: Sync version to package files
         run: |
@@ -779,7 +779,7 @@ jobs:
 
       - name: Publish ${{ env.PYPI_PACKAGE }} to PyPI
         id: pypi-publish
-        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           # Idempotent re-runs: when a wheel filename for the computed
           # version is already on PyPI (e.g. a previous push to main
@@ -807,7 +807,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: "20"
+          node-version: ">=24.16.0 <25"
           registry-url: ${{ env.NPM_REGISTRY_URL }}
 
       # No artifact download required: the publish steps below pack and
@@ -899,7 +899,7 @@ jobs:
       - name: Set up Node.js for GitHub Package Registry
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: "20"
+          node-version: ">=24.16.0 <25"
           registry-url: ${{ env.GITHUB_PACKAGES_REGISTRY_URL }}
 
       # No artifact download required: the publish-github-packages flow
