@@ -46,11 +46,6 @@ RUSTSEC-2024-0436  # paste 1.0.15 unmaintained, no fix published. Proc-macro, co
 # baseline. The three shipping npm lockfiles were fixed instead of recorded on
 # the same day, which is where the line sits: this fork publishes those, and
 # does not publish this.
-GHSA-2xp9-vwfh-vxw4  # next 16.3.0, fix 16.3.3. CRITICAL: unauthenticated RCE in the Image Optimization API when AVIF is enabled. Docs site not built or deployed from this fork.
-GHSA-p293-qw3h-jr36  # next 16.3.0, fix 16.3.3. CRITICAL: unauthenticated RCE on windows-hosted servers. This fork's runners and fleet are linux, and the site is not deployed from here at all.
-GHSA-rgj7-g3m4-5g8c  # sharp 0.35.3, fix 0.35.4. Inherited libheif CVEs, same class as the pruned GHSA-f88m-g3jw-g9cj. Build-time image processing for the undeployed docs site.
-GHSA-w5vr-8v7q-w6rv  # baseline-browser-mapping 2.10.16, fix 2.11.0. Process termination on invalid input. Transitive build-time dependency of the undeployed docs site.
-GHSA-866g-f22w-33x8  # @ai-sdk/provider-utils 4.0.23, fix 4.0.33. Unbounded resource consumption, LOW. Fixed rather than baselined in sdk/typescript, where the same advisory landed on 4.0.21; recorded here only because this lockfile is the one left alone.
 
 # --- uv.lock ----------------------------------------------------------------
 # Six entries lived here until 2026-09-09: three chromadb advisories, the f4j7
