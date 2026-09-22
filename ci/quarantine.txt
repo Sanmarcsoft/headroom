@@ -23,4 +23,3 @@
 # proved it.
 #
 # Removing an entry is always allowed and never needs a reason.
-tests/test_providers/test_deepseek.py::TestDeepSeekLiteLLMInjection::test_cost_per_token_resolves_deepseek_v4_flash  # non-hermetic upstream test: litellm fetches its model cost map from the network at import unless LITELLM_LOCAL_MODEL_COST_MAP is set, so the assertion (0.3 per million input tokens) tracks DeepSeek list price, not code. Failed on the runner with 0.15 on 2026-09-21 (run 35616859647, litellm 1.101.0) while the same version passes locally from the bundled map. Test file is identical to upstream. Remove when upstream pins the price source or drops the literal.
