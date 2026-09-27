@@ -127,3 +127,18 @@ docker exec code-server curl -s http://headroom:8787/stats
 
 `api_requests: 0` means the client is not routing through the proxy, however
 healthy it looks.
+
+## Metrics to the estate AI audit
+
+The sidecar can export Headroom's OTEL metrics (request counts, token totals,
+timings, with provider/model labels; never prompt or completion text) to the
+OpenLIT audit intake (Sanmarcsoft/headroom#73). Export is off by default.
+
+1. Build an image that carries the `otel` extra: `build.sh` adds it.
+2. From the dev container, where `pass` lives, run `./up-with-audit.sh`. It reads
+   the intake token from `pass`, checks the intake accepts it, and recreates the
+   sidecar on the Docker host with the header handed over on ssh stdin. The token
+   is never written to `.env`. `--dry-run` checks without changing anything;
+   `--off` turns export off again.
+
+Langfuse is not configured and must stay off.
