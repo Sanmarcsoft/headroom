@@ -97,6 +97,18 @@ services:
       # Required rather than defaulted on purpose: a deploy that forgets it should
       # fail at compose time instead of coming up quietly open.
       HEADROOM_PROXY_TOKEN: ${HEADROOM_PROXY_TOKEN:?set HEADROOM_PROXY_TOKEN in .env}
+      # OTEL metric export to the estate's AI audit (Sanmarcsoft/headroom#73).
+      # Off unless the launcher turns it on. Counts, token totals and timings
+      # with provider/model labels only: no prompt or completion text. The
+      # bearer header is never put in .env; up-with-audit.sh reads it from
+      # `pass` at launch and hands it to compose on ssh stdin. The image must
+      # carry the `otel` extra (build.sh adds it).
+      HEADROOM_OTEL_METRICS_ENABLED: ${HEADROOM_OTEL_METRICS_ENABLED:-0}
+      HEADROOM_OTEL_METRICS_EXPORTER: otlp_http
+      HEADROOM_OTEL_METRICS_ENDPOINT: ${HEADROOM_OTEL_METRICS_ENDPOINT:-}
+      HEADROOM_OTEL_METRICS_HEADERS: ${HEADROOM_OTEL_METRICS_HEADERS:-}
+      HEADROOM_OTEL_SERVICE_NAME: ${HEADROOM_OTEL_SERVICE_NAME:-headroom-proxy}
+      HEADROOM_OTEL_RESOURCE_ATTRIBUTES: ${HEADROOM_OTEL_RESOURCE_ATTRIBUTES:-}
 
     volumes:
       # Named volume so cache, memory and config survive `docker compose down`
