@@ -53,7 +53,12 @@ def is_telemetry_enabled() -> bool:
 #
 # This single constant is the whole policy — deliberately, so the decision is
 # one line to audit and one line to reverse.
-BEACON_DEFAULT_ON = True
+#
+# Fork control (Sanmarcsoft/headroom#79): False. FORK_CHARTER.md promises no
+# telemetry, so nothing uploads without an explicit HEADROOM_BEACON=on. Upstream
+# ships True; keep this line through every upstream sync
+# (tests/test_telemetry/test_beacon_fork_default.py fails if it flips back).
+BEACON_DEFAULT_ON = False
 
 
 def is_beacon_enabled() -> bool:
