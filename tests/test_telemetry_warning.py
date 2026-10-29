@@ -67,12 +67,21 @@ class TestFormatTelemetryNotice:
         monkeypatch.delenv("HEADROOM_TELEMETRY_WARN", raising=False)
         assert format_telemetry_notice() == ""
 
-    def test_beacon_is_announced_by_default(self, monkeypatch):
-        """The beacon is opt-out, so the notice is the only place a user finds
-        out it is running. Silence here is how anonymous telemetry becomes a
-        trust incident."""
+    def test_beacon_is_silent_by_default(self, monkeypatch):
+        """Fork control (#79): the beacon is opt-in, so with an empty
+        environment nothing uploads and the notice does not announce it."""
         for var in ("HEADROOM_TELEMETRY", "HEADROOM_BEACON", "DO_NOT_TRACK"):
             monkeypatch.delenv(var, raising=False)
+        monkeypatch.delenv("HEADROOM_TELEMETRY_WARN", raising=False)
+        assert "HEADROOM_BEACON=off" not in format_telemetry_notice()
+
+    def test_beacon_is_announced_when_enabled(self, monkeypatch):
+        """Once a user opts in, the notice is the only place they see it is
+        running. Silence here is how anonymous telemetry becomes a trust
+        incident."""
+        for var in ("HEADROOM_TELEMETRY", "DO_NOT_TRACK"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("HEADROOM_BEACON", "on")
         monkeypatch.delenv("HEADROOM_TELEMETRY_WARN", raising=False)
         notice = format_telemetry_notice()
         # Substance, not the exact phrasing: what is sent (counters), what is
@@ -85,8 +94,9 @@ class TestFormatTelemetryNotice:
     def test_beacon_notice_names_what_is_not_sent(self, monkeypatch):
         """Vague reassurance is worse than none. The notice has to name the
         three things users actually worry about."""
-        for var in ("HEADROOM_TELEMETRY", "HEADROOM_BEACON", "DO_NOT_TRACK"):
+        for var in ("HEADROOM_TELEMETRY", "DO_NOT_TRACK"):
             monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("HEADROOM_BEACON", "on")
         monkeypatch.delenv("HEADROOM_TELEMETRY_WARN", raising=False)
         notice = format_telemetry_notice()
         assert "never prompts" in notice
@@ -228,9 +238,10 @@ class TestWrapCLITelemetryNotice:
         assert "Telemetry" in captured.out
         assert "HEADROOM_TELEMETRY=off" in captured.out
 
-    def test_print_notice_announces_beacon_by_default(self, monkeypatch, capsys):
-        for var in ("HEADROOM_TELEMETRY", "HEADROOM_BEACON", "DO_NOT_TRACK"):
+    def test_print_notice_announces_beacon_when_enabled(self, monkeypatch, capsys):
+        for var in ("HEADROOM_TELEMETRY", "DO_NOT_TRACK"):
             monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("HEADROOM_BEACON", "on")
         monkeypatch.delenv("HEADROOM_TELEMETRY_WARN", raising=False)
 
         from headroom.cli.wrap import _print_telemetry_notice
