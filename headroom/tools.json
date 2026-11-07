@@ -1,12 +1,12 @@
 {
-  "_comment": "Registry of externally fetched CLI tool binaries. Every fetched asset is SHA256-pinned; a null or missing sha256 is a hard failure (fail-closed) unless HEADROOM_BINARIES_ALLOW_UNPINNED is set. After bumping a version, regenerate pins with scripts/refresh_tool_hashes.py; the tools-hash-refresh CI workflow verifies they match the published assets.",
+  "_comment": "Registry of externally fetched CLI tool binaries. SHA-256 pins are enforced before execution (headroom/binaries.py). After bumping a version, regenerate pins with scripts/refresh_tool_hashes.py; the tools-hash-refresh CI workflow verifies they match the published assets.",
   "tools": {
     "difft": {
       "version": "0.64.0",
       "binary": "difft",
       "source": "Wilfred/difftastic",
       "homepage": "https://difftastic.wilfred.me.uk/",
-      "_comment": "Upstream publishes both glibc and musl Linux builds for x86_64. We currently point the x86_64 musl key at the glibc asset (compatible via shims); a dedicated musl asset exists upstream and could be adopted separately.",
+      "_comment": "Upstream publishes glibc Linux builds only. The glibc binaries run on musl hosts (Alpine) via compatibility shims, so we point both gnu and musl keys at the same asset and document it here for auditors.",
       "assets": {
         "linux-x86_64-gnu": {
           "url": "https://github.com/Wilfred/difftastic/releases/download/0.64.0/difft-x86_64-unknown-linux-gnu.tar.gz",

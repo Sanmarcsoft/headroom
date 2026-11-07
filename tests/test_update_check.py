@@ -69,6 +69,18 @@ def test_select_latest_skips_fully_yanked():
     assert uc._select_latest(data, allow_pre=False) == "0.26.0"
 
 
+def test_select_latest_skips_release_with_no_files():
+    data = {"releases": {"1.0.0": [{"yanked": False}], "9.9.9": []}}
+    assert uc._select_latest(data, allow_pre=False) == "1.0.0"
+
+
+def test_select_latest_no_fallback_when_every_release_is_unavailable():
+    data = {"releases": {"9.9.9": []}, "info": {"version": "9.9.9"}}
+    assert uc._select_latest(data, allow_pre=False) is None
+    data = {"releases": {"9.9.9": [{"yanked": True}]}, "info": {"version": "9.9.9"}}
+    assert uc._select_latest(data, allow_pre=False) is None
+
+
 def test_select_latest_falls_back_to_info_version():
     data = {"releases": {}, "info": {"version": "0.26.0"}}
     assert uc._select_latest(data, allow_pre=False) == "0.26.0"
@@ -184,42 +196,3 @@ def test_maybe_check_async_skips_when_fresh(monkeypatch):
     uc.write_cache("0.27.0")
     monkeypatch.setattr(uc, "fetch_latest_version", lambda **k: pytest.fail("should not fetch"))
     assert uc.maybe_check_async() is None
-
-
-# --------------------------------------------------------------------------- #
-# format_first_run_notice / first-run disclosure
-# --------------------------------------------------------------------------- #
-def test_format_first_run_notice_names_destination_and_opt_out():
-    notice = uc.format_first_run_notice()
-    assert uc._PYPI_JSON_URL in notice
-    assert "HEADROOM_UPDATE_CHECK=off" in notice
-
-
-def test_maybe_check_async_prints_notice_on_first_run(monkeypatch, capsys):
-    # No cache present yet -> this is the first-ever check.
-    assert uc.read_cache() is None
-    monkeypatch.setattr(uc, "fetch_latest_version", lambda **k: "0.27.0")
-
-    thread = uc.maybe_check_async()
-    assert thread is not None
-    thread.join(timeout=5)
-
-    captured = capsys.readouterr()
-    assert captured.out == ""  # never touches stdout
-    assert uc._PYPI_JSON_URL in captured.err
-    assert "HEADROOM_UPDATE_CHECK=off" in captured.err
-
-
-def test_maybe_check_async_silent_on_later_runs(monkeypatch, capsys):
-    # A cache already exists from a prior check (now stale) -> not first run.
-    now = time.time()
-    uc.write_cache("0.26.0", now=now - uc._CHECK_TTL_SECONDS - 1)
-    monkeypatch.setattr(uc, "fetch_latest_version", lambda **k: "0.27.0")
-
-    thread = uc.maybe_check_async()
-    assert thread is not None
-    thread.join(timeout=5)
-
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == ""

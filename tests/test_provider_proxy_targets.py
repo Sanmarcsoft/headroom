@@ -2,34 +2,15 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
-import headroom.proxy.upstream_guard as upstream_guard_module
 from headroom.providers.proxy_targets import (
     api_target,
+    is_anthropic_hello_path,
+    openai_compatible_base_url,
     select_passthrough_base_url,
     vertex_target_for_location,
 )
 from headroom.providers.registry import DEFAULT_VERTEX_API_URL
 from headroom.proxy import upstream_guard
-
-
-@pytest.fixture(autouse=True)
-def _resolve_test_hosts_as_public(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the .example hosts in this module resolve to a public address.
-
-    The SSRF guard (headroom/proxy/ssrf.py) fails closed on a hostname that
-    does not resolve, which is correct in production but would block every
-    fake host used here. Stubbing resolution keeps these tests about target
-    selection rather than about DNS.
-    """
-    import socket as _socket
-
-    monkeypatch.setattr(
-        upstream_guard_module.socket,
-        "getaddrinfo",
-        lambda *a, **k: [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
-    )
 
 
 def _proxy(**legacy_targets: str):
@@ -99,3 +80,79 @@ def test_select_passthrough_base_url_handles_special_auth_modes() -> None:
         "https://legacy.anthropic.test"
     )
     assert select_passthrough_base_url(proxy, {}) == "https://legacy.openai.test"
+    assert select_passthrough_base_url(proxy, {}, "/api/hello") == "https://legacy.anthropic.test"
+    assert select_passthrough_base_url(proxy, {}, "/api/hello/") == "https://legacy.anthropic.test"
+    # Non-probe unauthenticated paths still fall through to OpenAI.
+    assert select_passthrough_base_url(proxy, {}, "/other/endpoint") == "https://legacy.openai.test"
+    # A configured OpenAI target outranks Grok wire signals (see
+    # ``test_openai_compatible_base_url_respects_configured_openai_target``).
+    assert (
+        select_passthrough_base_url(
+            proxy,
+            {
+                "x-xai-token-auth": "xai-grok-cli",
+                "user-agent": "grok-shell/0.2.117",
+            },
+        )
+        == "https://legacy.openai.test"
+    )
+
+
+def test_openai_compatible_base_url_routes_grok_to_xai_on_default_target() -> None:
+    """The shared-proxy case this routing exists for: OpenAI target untouched."""
+    proxy = _proxy(OPENAI_API_URL="https://api.openai.com")
+    grok_headers = {"user-agent": "grok-pager/0.2.117 grok-shell/0.2.117"}
+
+    assert openai_compatible_base_url(proxy, grok_headers) == "https://api.x.ai"
+    assert openai_compatible_base_url(proxy, {}) == "https://api.openai.com"
+    # Also via passthrough, which is the catch-all entry point Grok CLI hits.
+    assert select_passthrough_base_url(proxy, grok_headers) == "https://api.x.ai"
+
+
+def test_openai_compatible_base_url_routes_grok_build_to_xai_on_default_target() -> None:
+    """Grok Build + Antigravity manifest case: the OpenAI target stays default.
+
+    Antigravity needs api.openai.com, so the manifest cannot point the whole
+    proxy at xAI; Grok Build's ``grok/`` user agent must still route there per
+    request — for direct inference and for model-list/passthrough alike.
+    """
+    proxy = _proxy(OPENAI_API_URL="https://api.openai.com")
+    grok_build_headers = {"user-agent": "grok/1.2.3"}
+
+    assert openai_compatible_base_url(proxy, grok_build_headers) == "https://api.x.ai"
+    assert select_passthrough_base_url(proxy, grok_build_headers) == "https://api.x.ai"
+    # Antigravity traffic keeps the default OpenAI target.
+    assert (
+        openai_compatible_base_url(proxy, {"user-agent": "antigravity/1.0.0"})
+        == "https://api.openai.com"
+    )
+
+
+def test_openai_compatible_base_url_respects_configured_openai_target() -> None:
+    """An operator gateway is chosen for every OpenAI-compatible client.
+
+    A client User-Agent must not silently bypass it, nor carry the gateway's
+    ``OPENAI_TARGET_API_HEADERS`` to a different vendor.
+    """
+    proxy = _proxy(OPENAI_API_URL="https://legacy.openai.test")
+
+    assert (
+        openai_compatible_base_url(
+            proxy,
+            {"user-agent": "grok-pager/0.2.117 grok-shell/0.2.117"},
+        )
+        == "https://legacy.openai.test"
+    )
+    assert openai_compatible_base_url(proxy, {}) == "https://legacy.openai.test"
+
+
+def test_is_anthropic_hello_path() -> None:
+    assert is_anthropic_hello_path("/api/hello")
+    assert is_anthropic_hello_path("api/hello")
+    assert is_anthropic_hello_path("/api/hello/")
+    assert is_anthropic_hello_path("api/hello/")
+    assert not is_anthropic_hello_path(None)
+    assert not is_anthropic_hello_path("")
+    assert not is_anthropic_hello_path("/api/hello/extra")
+    assert not is_anthropic_hello_path("/v1/messages")
+    assert not is_anthropic_hello_path("/hello")

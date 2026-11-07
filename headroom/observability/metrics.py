@@ -13,6 +13,8 @@ from opentelemetry import metrics
 from opentelemetry.metrics import CallbackOptions, Observation
 
 from headroom._version import get_version
+from headroom.offline import guard_egress
+from headroom.proxy.savings_attribution import event_count
 
 logger = logging.getLogger(__name__)
 
@@ -207,12 +209,15 @@ class HeadroomOtelMetrics:
         )
         self._proxy_failed_requests = self._meter.create_counter(
             "headroom.proxy.requests.failed",
-            description="Proxy requests that failed.",
+            description="Proxy requests that failed upstream (4xx and 5xx, excluding 429).",
             unit="1",
         )
         self._proxy_rate_limited_requests = self._meter.create_counter(
             "headroom.proxy.requests.rate_limited",
-            description="Proxy requests rejected by rate limiting.",
+            description=(
+                "Proxy requests rejected with 429, by source "
+                "(headroom=our own limiter, upstream=the provider)."
+            ),
             unit="1",
         )
         self._proxy_input_tokens = self._meter.create_counter(
@@ -554,7 +559,7 @@ class HeadroomOtelMetrics:
                 realized=bool(item.get("realized", True)),
                 estimated=bool(item.get("estimated", False)),
             )
-            self._savings_attribution_events.add(1, attrs)
+            self._savings_attribution_events.add(event_count(item), attrs)
             saved = max(0, int(item.get("tokens", 0) or 0))
             if saved:
                 self._savings_attributed_tokens.add(saved, attrs)
@@ -567,8 +572,15 @@ class HeadroomOtelMetrics:
         *,
         provider: str | None = None,
         model: str | None = None,
+        source: str = "headroom",
     ) -> None:
-        self._proxy_rate_limited_requests.add(1, self._attrs(provider=provider, model=model))
+        # ``source`` mirrors the headroom_requests_rate_limited_total{source}
+        # Prometheus label: "headroom" = our own limiter refused the request,
+        # "upstream" = the provider did. Same split in both backends so an
+        # operator's query means the same thing whichever one they scrape.
+        self._proxy_rate_limited_requests.add(
+            1, self._attrs(provider=provider, model=model, source=source)
+        )
 
     def record_proxy_cache_bust(self, *, tokens_lost: int) -> None:
         self._proxy_cache_busts.add(1)
@@ -707,6 +719,22 @@ def configure_otel_metrics(config: OTelMetricsConfig | None = None) -> HeadroomO
     if resolved.exporter == "console":
         exporter = ConsoleMetricExporter()
     else:
+        # Air-gap chokepoint. OTLP/HTTP export dials a collector and then keeps
+        # POSTing on a background timer (PeriodicExportingMetricReader), so it
+        # is exactly the kind of long-lived, easy-to-forget egress
+        # HEADROOM_OFFLINE is supposed to cover — and it was not covered.
+        #
+        # The guard runs before OTLPMetricExporter is constructed, because the
+        # exporter opens its session eagerly. No exemption for a collector that
+        # looks local: the endpoint may be unset here (the OTEL SDK then falls
+        # back to OTEL_EXPORTER_OTLP_ENDPOINT or the 4318 default) and a
+        # sidecar address is not distinguishable from an internet one. An
+        # operator who wants in-cluster metrics under an air-gap should use the
+        # "console" exporter or scrape /metrics, both of which stay on-box.
+        guard_egress(
+            "OTLP metric export",
+            resolved.endpoint or "the OTEL SDK's default OTLP endpoint",
+        )
         exporter_kwargs: dict[str, Any] = {}
         if resolved.endpoint is not None:
             exporter_kwargs["endpoint"] = resolved.endpoint

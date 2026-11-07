@@ -1,6 +1,6 @@
 """Best-effort "is a newer Headroom released?" check.
 
-This module is intentionally dependency-light (stdlib + ``packaging`` only:
+This module is intentionally dependency-light (stdlib + ``packaging`` only —
 ``httpx`` lives in the ``[proxy]`` extra and must not be required by the base
 CLI). It mirrors the telemetry beacon contract: opt-out, cached, fire-and-
 forget, and it must never raise into a caller or block startup.
@@ -8,16 +8,9 @@ forget, and it must never raise into a caller or block startup.
 Two halves, deliberately split so a background thread never races stdout:
 
 * :func:`maybe_check_async` performs the (rate-limited) network probe on a
-  daemon thread and writes the result to a cache file. It prints nothing on
-  stdout. On the very first check ever (no cache file present yet), it writes
-  a single disclosure line to *stderr* (see :func:`format_first_run_notice`),
-  naming the destination contacted and how to opt out, in the same style as
-  ``headroom.telemetry.beacon.format_telemetry_notice``. Stderr rather than
-  stdout so it still cannot corrupt a caller's stdout output; it is a
-  one-time exception to "prints nothing", not a recurring banner (subsequent
-  daily checks stay silent).
+  daemon thread and writes the result to a cache file. It prints nothing.
 * :func:`format_update_notice` reads *only* the cache and returns a one-line
-  "update available" notice string (or ``None``). Callers own the rendering.
+  notice string (or ``None``). Callers own the rendering.
 
 Opt out with ``HEADROOM_UPDATE_CHECK=off``. Also skipped in ``--stateless``
 mode, in CI, inside Docker, and from a git checkout (developers manage their
@@ -29,12 +22,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import threading
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import ssl
 
 logger = logging.getLogger(__name__)
 
@@ -46,17 +41,11 @@ _CACHE_FILE = "update_check.json"
 _CHECK_TTL_SECONDS = 86_400
 
 _OFF_VALUES = frozenset(("off", "false", "0", "no", "disable", "disabled"))
-_TRUE_VALUES = frozenset(("on", "true", "1", "yes", "enable", "enabled"))
 
 
 def _env_off(name: str, default: str = "on") -> bool:
     """Return True when env var ``name`` is set to a falsey/off value."""
     return os.environ.get(name, default).strip().lower() in _OFF_VALUES
-
-
-def _env_on(name: str) -> bool:
-    """Return True when env var ``name`` is set to a truthy/on value."""
-    return os.environ.get(name, "").strip().lower() in _TRUE_VALUES
 
 
 def is_update_check_enabled() -> bool:
@@ -73,7 +62,9 @@ def is_update_check_enabled() -> bool:
         return False
     if _env_off("HEADROOM_UPDATE_CHECK"):
         return False
-    if _env_on("HEADROOM_STATELESS"):
+    from headroom.paths import process_is_stateless
+
+    if process_is_stateless():
         return False
     if os.environ.get("CI", "").strip():
         return False
@@ -91,7 +82,7 @@ def _is_source_checkout() -> bool:
 
 
 def _in_docker() -> bool:
-    """Best-effort container detection (image rebuilds, not self-update)."""
+    """Best-effort container detection — image rebuilds, not self-update."""
     try:
         return Path("/.dockerenv").exists() or bool(
             os.environ.get("HEADROOM_IN_DOCKER", "").strip()
@@ -104,7 +95,7 @@ def installed_version() -> str | None:
     """Return the *installed-distribution* version, or None.
 
     Deliberately uses ``importlib.metadata`` rather than
-    ``headroom._version.get_version()``: the latter computes a synthetic
+    ``headroom._version.get_version()`` — the latter computes a synthetic
     version from git history in a checkout, which would produce a meaningless
     comparison against PyPI.
     """
@@ -141,8 +132,10 @@ def read_cache() -> dict[str, Any] | None:
 def write_cache(latest_version: str, *, now: float | None = None) -> None:
     """Persist the latest-known version + check timestamp. Never raises."""
     try:
-        from headroom.paths import ensure_workspace_dir
+        from headroom.paths import ensure_workspace_dir, persistence_allowed
 
+        if not persistence_allowed("update-check cache"):
+            return
         ensure_workspace_dir()
         payload = {
             "last_check": now if now is not None else time.time(),
@@ -165,11 +158,9 @@ def _select_latest(data: dict[str, Any], *, allow_pre: bool) -> str | None:
     candidates: list[Version] = []
     if isinstance(releases, dict):
         for ver_str, files in releases.items():
-            # Skip releases whose every artifact is yanked.
-            if (
-                isinstance(files, list)
-                and files
-                and all(isinstance(f, dict) and f.get("yanked") for f in files)
+            # Skip releases with no artifacts, or whose every artifact is yanked.
+            if isinstance(files, list) and (
+                not files or all(isinstance(f, dict) and f.get("yanked") for f in files)
             ):
                 continue
             try:
@@ -181,6 +172,10 @@ def _select_latest(data: dict[str, Any], *, allow_pre: bool) -> str | None:
             candidates.append(ver)
     if candidates:
         return str(max(candidates))
+    if isinstance(releases, dict) and releases:
+        # Releases are listed but none is installable (all yanked or file-less):
+        # do not fall back to info.version, which names one of them.
+        return None
 
     # Fallback to info.version when releases is absent/empty.
     info = data.get("info")
@@ -197,37 +192,51 @@ def _select_latest(data: dict[str, Any], *, allow_pre: bool) -> str | None:
     return None
 
 
+def _urlopen_ssl_context() -> ssl.SSLContext | None:
+    """Return an SSL context for urllib.request.urlopen that honors Headroom's
+    trust policy (OS store + certifi, HEADROOM_CA_BUNDLE, etc).
+
+    Imported lazily so this module's dependency footprint stays at stdlib +
+    packaging when the trust helpers aren't yet importable (e.g. during early
+    startup or in minimal test environments). Falls back to ``None`` (urlopen's
+    default) when the helper cannot be loaded.
+    """
+    try:
+        from headroom.proxy.ssl_context import build_urlopen_context
+    except ImportError:
+        return None
+
+    return build_urlopen_context()
+
+
 def fetch_latest_version(*, allow_pre: bool = False, timeout: float = 4.0) -> str | None:
     """Query the PyPI JSON API for the latest release. Returns None on any error.
 
     Uses ``urllib`` (stdlib) so the base CLI install needs no HTTP dependency.
+    Passes Headroom's configured SSL context so corporate TLS-inspection roots
+    (Zscaler, Netskope, ...) installed in the OS trust store — or referenced via
+    ``HEADROOM_CA_BUNDLE`` / ``SSL_CERT_FILE`` — are trusted the same way the
+    proxy trusts them.
     """
     try:
+        from headroom.offline import guard_egress
+
+        guard_egress("Headroom update check", _PYPI_JSON_URL)
         req = urllib.request.Request(
             _PYPI_JSON_URL,
             headers={"Accept": "application/json", "User-Agent": "headroom-update-check"},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (fixed https URL)
+        ctx = _urlopen_ssl_context()
+        if ctx is not None:
+            resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)  # noqa: S310 — fixed https URL
+        else:
+            resp = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310 — fixed https URL
+        with resp:
             data = json.loads(resp.read().decode("utf-8"))
         return _select_latest(data, allow_pre=allow_pre)
     except Exception:
         logger.debug("update_check: PyPI fetch failed", exc_info=True)
         return None
-
-
-def format_first_run_notice() -> str:
-    """Return the one-time opt-out disclosure for the background update check.
-
-    Mirrors ``headroom.telemetry.beacon.format_telemetry_notice``'s style: a
-    single line naming what happens, the destination contacted, and the env
-    var to disable it. Emitted by :func:`maybe_check_async` only on the very
-    first check (no cache file yet present); never repeated on subsequent
-    daily checks.
-    """
-    return (
-        f"Update check: contacting {_PYPI_JSON_URL} (at most once per day) to look for "
-        f"newer {PACKAGE_NAME} releases | Disable: HEADROOM_UPDATE_CHECK=off"
-    )
 
 
 def should_check(now: float | None = None) -> bool:
@@ -245,7 +254,7 @@ def should_check(now: float | None = None) -> bool:
 def run_check(*, allow_pre: bool = False, now: float | None = None) -> str | None:
     """Probe PyPI and update the cache. Returns the latest version or None.
 
-    Synchronous; used directly by ``headroom update`` and indirectly by
+    Synchronous — used directly by ``headroom update`` and indirectly by
     :func:`maybe_check_async`. Honors the enable gate.
     """
     if not is_update_check_enabled():
@@ -262,24 +271,15 @@ def maybe_check_async() -> threading.Thread | None:
     Returns the spawned thread (for tests) or None when the check is gated off,
     suppressed (checkout/Docker), or still within the TTL window. Never blocks
     and never raises.
-
-    On the very first check ever (no cache file present before this call),
-    the spawned thread writes :func:`format_first_run_notice` to stderr before
-    probing PyPI, so the opt-out network call is disclosed up front rather
-    than happening silently. Every later check (cache already exists) stays
-    silent, matching the pre-existing "prints nothing" contract.
     """
     try:
         if not is_update_check_enabled() or _is_source_checkout() or _in_docker():
             return None
-        first_run = read_cache() is None
         if not should_check():
             return None
 
         def _worker() -> None:
             try:
-                if first_run:
-                    print(format_first_run_notice(), file=sys.stderr, flush=True)
                 run_check()
             except Exception:
                 logger.debug("update_check: background check crashed", exc_info=True)
@@ -329,7 +329,6 @@ def format_update_notice() -> str | None:
 __all__ = [
     "PACKAGE_NAME",
     "fetch_latest_version",
-    "format_first_run_notice",
     "format_update_notice",
     "installed_version",
     "is_update_check_enabled",

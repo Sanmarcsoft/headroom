@@ -23,3 +23,12 @@
 # proved it.
 #
 # Removing an entry is always allowed and never needs a reason.
+
+# 2026-11-07, upstream v0.43.1 sync (Sanmarcsoft/headroom#81). Upstream's read
+# maturation compresses a stale Read result through kompress and these two tests
+# assert that a Python file matures. The fork keeps source code out of the lossy
+# compressor by policy (63d533cd, verbatim guard), so a .py Read never matures
+# here. Deliberate divergence, not a defect; revisit if the guard learns to let
+# CCR-retrievable maturation through.
+tests/test_read_maturation_handler_nobust.py::test_read_inside_the_cached_prefix_stays_verbatim[provider-uncached-quiet]  # fork policy: source code never reaches kompress (verbatim guard)
+tests/test_read_maturation_handler_nobust.py::test_quiesce_turns_config_is_honored  # fork policy: source code never reaches kompress (verbatim guard)
