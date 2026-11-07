@@ -5,6 +5,9 @@
 import os
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# LiteLLM is only a price table here. Use its bundled copy, not the network
+# fetch at import: the remote map lost the Claude keys (red since 2026-10-14).
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 import json
 import tempfile

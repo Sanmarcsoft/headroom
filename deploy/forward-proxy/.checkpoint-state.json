@@ -1,0 +1,17 @@
+{
+  "committed_iscs": [
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "C8",
+    "C9",
+    "C10"
+  ],
+  "last_commit_sha": {
+    "/config/.claude": "46b55186c1c16b069a771414a80db33c1f99ab4b"
+  }
+}
