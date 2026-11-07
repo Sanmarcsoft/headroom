@@ -14,7 +14,7 @@
   ],
   "recommended_serena_args": [
     "--from",
-    "serena-agent",
+    "git+https://github.com/oraios/serena@bcac0969fb8685783ea6d0f2642468fcc47e6395",
     "serena",
     "start-mcp-server",
     "--project-from-cwd",
@@ -22,5 +22,6 @@
     "claude-code",
     "--open-web-dashboard",
     "False"
-  ]
+  ],
+  "_comment": "recommended_serena_args carries this fork's immutable git commit pin, not upstream's floating PyPI 'serena-agent'. old_serena_args is the UNPINNED git ref from issue 3054, so reconcile still has real work to do: it migrates unpinned -> pinned. See tests/test_mcp_registry/test_install.py::test_build_serena_spec_uses_the_immutable_git_pin for the trade-off."
 }
