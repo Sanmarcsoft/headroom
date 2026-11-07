@@ -297,43 +297,22 @@ class TestMemoryTopKValidation:
 
 
 class TestMissingProxyDepsError:
-    """When proxy dependencies are absent the CLI should print an actionable error and exit 1.
-
-    Both cases patch ``headroom.cli.proxy.import_module``, the symbol
-    ``ensure_proxy_dependencies`` actually calls, rather than
-    ``builtins.__import__``.
-
-    Patching ``builtins.__import__`` does not work here and produced a test that
-    passed alone and failed in the suite. ``importlib.import_module`` goes
-    through ``_bootstrap._gcd_import``, not ``builtins.__import__``, so the patch
-    only ever fired indirectly: on a *fresh* import, the target package's own
-    internal ``import`` statements went through the patched builtin. Once any
-    earlier test had put the package in ``sys.modules``, ``import_module``
-    returned the cached object, no internal import ran, the patch never fired,
-    and the loop continued to the next name. It then failed on the first
-    genuinely absent module and reported that one instead: ``magika``,
-    ``onnxruntime`` and ``watchdog`` live in the ``proxy`` extra and the gate
-    installs only ``--extra dev``.
-    """
-
-    @staticmethod
-    def _fail_on(monkeypatch: pytest.MonkeyPatch, missing: str) -> None:
-        from headroom.cli import proxy as proxy_cli
-
-        real_import_module = proxy_cli.import_module
-
-        def fake_import_module(name: str, package: str | None = None):
-            if name == missing:
-                raise ImportError(f"No module named '{missing}'")
-            return real_import_module(name, package)
-
-        monkeypatch.setattr(proxy_cli, "import_module", fake_import_module)
+    """When proxy dependencies are absent the CLI should print an actionable error and exit 1."""
 
     @pytest.mark.proxy_dependency_gate
     def test_proxy_command_exits_when_mcp_missing(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._fail_on(monkeypatch, "mcp")
+        from importlib.util import find_spec
+
+        def fake_find_spec(name: str) -> object:
+            return None if name == "mcp" else find_spec(name)
+
+        monkeypatch.setattr("headroom.cli.proxy.find_spec", fake_find_spec)
+        monkeypatch.setattr(
+            "uvicorn.run",
+            lambda *args, **kwargs: pytest.fail("missing dependencies must not start a server"),
+        )
         result = runner.invoke(main, ["proxy"])
         assert result.exit_code == 1, result.output
         assert "pip install headroom-ai[proxy]" in result.output
@@ -345,7 +324,10 @@ class TestMissingProxyDepsError:
     ) -> None:
         from headroom.cli.proxy import ensure_proxy_dependencies
 
-        self._fail_on(monkeypatch, "fastapi")
+        monkeypatch.setattr(
+            "headroom.cli.proxy.find_spec",
+            lambda name: None if name == "fastapi" else object(),
+        )
 
         with pytest.raises(SystemExit) as exc_info:
             ensure_proxy_dependencies()

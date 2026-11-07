@@ -14,8 +14,31 @@ MAX_STACK_VALUES = 64
 MAX_TRACKED_MODELS = 200
 MAX_EXPOSED_MODELS = 100
 MAX_LABEL_LENGTH = 128
+OTHER_MODEL = "other"
+# ``CostTracker.stats()`` skips keys with this prefix; an overflowing
+# passthrough name must keep it or it would enter the processed-traffic totals.
+PASSTHROUGH_PREFIX = "passthrough:"
+OTHER_PASSTHROUGH_MODEL = PASSTHROUGH_PREFIX + OTHER_MODEL
+
+
+def bounded_model_key(model: str, tracked: Any) -> str:
+    """Key under which a client-supplied model name may enter a per-model map.
+
+    ``model`` comes from the request body, so it is clipped to
+    ``MAX_LABEL_LENGTH`` and a new name past ``MAX_TRACKED_MODELS`` distinct
+    keys collapses into ``OTHER_MODEL`` (``OTHER_PASSTHROUGH_MODEL`` for a
+    ``passthrough:`` name). ``tracked`` is the map being written.
+    """
+    key = model[:MAX_LABEL_LENGTH]
+    if key in tracked or len(tracked) < MAX_TRACKED_MODELS:
+        return key
+    return OTHER_PASSTHROUGH_MODEL if key.startswith(PASSTHROUGH_PREFIX) else OTHER_MODEL
+
 
 KNOWN_MISS_REASONS = frozenset({"ttl_expiry", "prefix_change", "unknown"})
+# Mirrors RATE_LIMIT_SOURCES in prometheus_metrics: "headroom" is our own
+# limiter refusing the request, "upstream" is the provider refusing it.
+RATE_LIMIT_SOURCES = frozenset({"headroom", "upstream"})
 # Names must match ``WasteSignals.to_dict()`` in headroom/config.py — the
 # parser emits ``json_bloat``; an allowlist that says ``json_noise`` silently
 # shoves the largest waste category into the catch-all bucket.
@@ -60,6 +83,15 @@ def _coerce_float(value: Any) -> float:
     return result if math.isfinite(result) and result >= 0 else 0.0
 
 
+def _coerce_signed_float(value: Any) -> float:
+    """_coerce_float without the zero floor, for compression savings that can lose."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return result if math.isfinite(result) else 0.0
+
+
 def _label(value: Any) -> str:
     if not isinstance(value, str):
         return "other"
@@ -91,6 +123,12 @@ def _empty_state() -> dict[str, Any]:
             "cached": 0,
             "failed": 0,
             "rate_limited": 0,
+            # Who produced the failure / who refused the request. The totals
+            # above stay the unlabelled figures the dashboard reads; these
+            # split them the same way the Prometheus labels do, so no backend
+            # reports a differently-shaped counter (issue #3696).
+            "failed_by_provider": {},
+            "rate_limited_by_source": {},
             "by_provider": {},
             "by_stack": {},
         },
@@ -182,6 +220,17 @@ class PersistentMetricsState:
         result["requests"]["by_provider"] = self._normalize_count_map(
             raw_requests.get("by_provider"), MAX_PROVIDER_VALUES
         )
+        result["requests"]["failed_by_provider"] = self._normalize_count_map(
+            raw_requests.get("failed_by_provider"), MAX_PROVIDER_VALUES
+        )
+        # A state file written before #3696 has no split, and back-filling the
+        # legacy total into one bucket would invent history we never observed —
+        # so it loads empty and only new events populate it. The unlabelled
+        # ``rate_limited`` total is untouched and stays comparable across the
+        # upgrade.
+        result["requests"]["rate_limited_by_source"] = self._normalize_enum_map(
+            raw_requests.get("rate_limited_by_source"), RATE_LIMIT_SOURCES, fallback="headroom"
+        )
         result["requests"]["by_stack"] = self._normalize_count_map(
             raw_requests.get("by_stack"), MAX_STACK_VALUES
         )
@@ -217,7 +266,10 @@ class PersistentMetricsState:
             "compression_savings_list_usd",
             "cache_savings_usd",
         ):
-            result["cost"][key] = round(_coerce_float(raw_cost.get(key)), 6)
+            coerce = (
+                _coerce_signed_float if key.startswith("compression_savings") else _coerce_float
+            )
+            result["cost"][key] = round(coerce(raw_cost.get(key)), 6)
         # A state written before cache-aware pricing has no list column and its
         # dollars WERE list-priced, so that one figure seeds both and the
         # aggregate stays honestly labelled.
@@ -226,7 +278,7 @@ class PersistentMetricsState:
         # column, and labelling that "list" would tell every new install its
         # untouched $0.00 total was list-priced. Only a state that actually
         # accumulated dollars has history to migrate.
-        has_priced_history = result["cost"]["compression_savings_usd"] > 0
+        has_priced_history = result["cost"]["compression_savings_usd"] != 0
         if "compression_savings_list_usd" in raw_cost:
             result["cost"]["savings_basis"] = str(raw_cost.get("savings_basis") or "unknown")
         elif has_priced_history:
@@ -426,7 +478,7 @@ class PersistentMetricsState:
         cost = self._state["cost"]
         cost["input_usd"] = round(cost["input_usd"] + _coerce_float(input_usd), 6)
         cost["compression_savings_usd"] = round(
-            cost["compression_savings_usd"] + _coerce_float(compression_savings_usd), 6
+            cost["compression_savings_usd"] + _coerce_signed_float(compression_savings_usd), 6
         )
         # Defaults to the cache-aware figure when a caller supplies no ceiling,
         # which is the truthful reading of "these are the same number" for a
@@ -437,7 +489,9 @@ class PersistentMetricsState:
             else compression_savings_list_usd
         )
         cost["compression_savings_list_usd"] = round(
-            _coerce_float(cost.get("compression_savings_list_usd")) + _coerce_float(list_delta), 6
+            _coerce_signed_float(cost.get("compression_savings_list_usd"))
+            + _coerce_signed_float(list_delta),
+            6,
         )
         if savings_basis:
             cost["savings_basis"] = _blend_savings_basis(cost.get("savings_basis"), savings_basis)
@@ -474,12 +528,29 @@ class PersistentMetricsState:
 
         self._record_activity()
         self._state["requests"]["failed"] += 1
+        self._increment_count(
+            self._state["requests"]["failed_by_provider"], _label(provider), MAX_PROVIDER_VALUES
+        )
 
-    def record_rate_limited(self, *, provider: str | None = None, model: str | None = None) -> None:
-        """Record a rate-limited request without redefining total request semantics."""
+    def record_rate_limited(
+        self,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        source: str = "headroom",
+    ) -> None:
+        """Record a rate-limited request without redefining total request semantics.
+
+        ``source`` is ``headroom`` (our own limiter) or ``upstream`` (the
+        provider's 429); anything else is clamped to ``headroom``, which is what
+        this counter meant before upstream 429s started reaching it.
+        """
 
         self._record_activity()
         self._state["requests"]["rate_limited"] += 1
+        bucket = source if source in RATE_LIMIT_SOURCES else "headroom"
+        by_source = self._state["requests"]["rate_limited_by_source"]
+        by_source[bucket] = by_source.get(bucket, 0) + 1
 
     def record_cache_bust(self, *, tokens_lost: Any = 0) -> None:
         self._record_activity()

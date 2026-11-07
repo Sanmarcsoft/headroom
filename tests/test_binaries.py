@@ -5,9 +5,9 @@ No network access. A fake urlopen serves bytes from an in-memory fixture.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import io
+import ssl
 import sys
 import tarfile
 import zipfile
@@ -33,8 +33,10 @@ def _clear_caches(monkeypatch, tmp_path):
     monkeypatch.setenv("HEADROOM_BINARIES_CACHE", str(tmp_path / "cache"))
     monkeypatch.delenv("HEADROOM_BINARIES_MIRROR", raising=False)
     monkeypatch.delenv("HEADROOM_BINARIES_OFFLINE", raising=False)
-    monkeypatch.delenv("HEADROOM_BINARIES_ALLOW_UNPINNED", raising=False)
-    monkeypatch.delenv("HEADROOM_BINARIES_MIRROR_CONFIRM", raising=False)
+    # Verification fails closed on a nulled (unpinned) asset, so mechanics
+    # tests opt into the escape hatch via the `allow_unverified` fixture; a
+    # developer's exported value must not leak in and mask the guard.
+    monkeypatch.delenv("HEADROOM_BINARIES_ALLOW_UNVERIFIED", raising=False)
     yield
     binaries.detect_platform.cache_clear()
     binaries._registry.cache_clear()
@@ -85,11 +87,22 @@ class _FakeResponse:
 
 
 @pytest.fixture
+def allow_unverified(monkeypatch):
+    """Opt out of SHA-256 verification for tests about fetch/extract mechanics.
+
+    The autouse fixture nulls the shipped pins so these tests can serve small
+    mock archives; without the escape hatch every such fetch is refused as
+    unpinned, which is the point of `test_unpinned_*` below.
+    """
+    monkeypatch.setenv("HEADROOM_BINARIES_ALLOW_UNVERIFIED", "1")
+
+
+@pytest.fixture
 def fake_urlopen(monkeypatch):
     """Install a fake urllib.request.urlopen that serves registered URLs."""
     served: dict[str, bytes] = {}
 
-    def fake(req, timeout=None):  # noqa: ARG001
+    def fake(req, timeout=None, context=None):  # noqa: ARG001
         url = req.full_url if hasattr(req, "full_url") else req
         if url not in served:
             raise AssertionError(f"unexpected fetch for {url}")
@@ -97,22 +110,6 @@ def fake_urlopen(monkeypatch):
 
     monkeypatch.setattr(binaries.urllib.request, "urlopen", fake)
     return served
-
-
-@contextlib.contextmanager
-def _pinned(asset: dict, data: bytes):
-    """Temporarily pin a registry asset to the sha256 of a synthetic archive.
-
-    Shipped assets now carry real sha256 pins and verification fails closed, so
-    a test that serves its own fixture bytes has to pin to those bytes. Restores
-    the shipped pin on exit so tests stay independent.
-    """
-    original = asset.get("sha256")
-    asset["sha256"] = hashlib.sha256(data).hexdigest()
-    try:
-        yield
-    finally:
-        asset["sha256"] = original
 
 
 # -------- Platform detection --------------------------------------------- #
@@ -211,9 +208,7 @@ def test_offline_error_when_fetch_required(monkeypatch):
 
 
 def test_mirror_substitution(monkeypatch):
-    mirror = "https://mirror.example.com/gh"
-    monkeypatch.setenv("HEADROOM_BINARIES_MIRROR", mirror)
-    monkeypatch.setenv("HEADROOM_BINARIES_MIRROR_CONFIRM", mirror)
+    monkeypatch.setenv("HEADROOM_BINARIES_MIRROR", "https://mirror.example.com/gh")
     out = binaries._mirror_url(
         "https://github.com/Wilfred/difftastic/releases/download/0.64.0/x.tar.gz"
     )
@@ -224,7 +219,23 @@ def test_mirror_substitution(monkeypatch):
     assert binaries._mirror_url("https://example.com/x") == "https://example.com/x"
 
 
-def test_mirror_url_with_query_params_strips_them_from_download_filename(monkeypatch, fake_urlopen):
+def test_download_wraps_tls_context_error_and_preserves_cause(monkeypatch, tmp_path):
+    error = ssl.SSLError("invalid configured certificate bundle")
+    monkeypatch.setattr(
+        binaries,
+        "_ssl_context",
+        lambda: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(binaries.BinaryFetchError, match="failed to configure TLS trust") as exc:
+        binaries._download("https://example.invalid/tool.tar.gz", tmp_path / "tool.tar.gz")
+
+    assert exc.value.__cause__ is error
+
+
+def test_mirror_url_with_query_params_strips_them_from_download_filename(
+    monkeypatch, fake_urlopen, allow_unverified
+):
     """Mirror URLs with `?token=...` must not leak into the download filename.
 
     Regression test for the case where `Path(url).name` gave
@@ -245,15 +256,14 @@ def test_mirror_url_with_query_params_strips_them_from_download_filename(monkeyp
     asset["url"] = tokened_url
     fake_urlopen[tokened_url] = archive
     try:
-        with _pinned(asset, archive):
-            path = binaries.resolve("difft")
+        path = binaries.resolve("difft")
         assert path.exists()
         assert path.read_bytes() == b"ok"
     finally:
         asset["url"] = original_url
 
 
-def test_fetch_extract_and_cache_tar_gz(monkeypatch, fake_urlopen, tmp_path):
+def test_fetch_extract_and_cache_tar_gz(monkeypatch, fake_urlopen, tmp_path, allow_unverified):
     _set_platform(monkeypatch, sys_plat="darwin", machine="arm64")
     monkeypatch.setattr(binaries.shutil, "which", lambda _name: None)
 
@@ -262,18 +272,16 @@ def test_fetch_extract_and_cache_tar_gz(monkeypatch, fake_urlopen, tmp_path):
     url = "https://github.com/Wilfred/difftastic/releases/download/0.64.0/difft-aarch64-apple-darwin.tar.gz"
     fake_urlopen[url] = archive
 
-    asset = binaries._registry()["tools"]["difft"]["assets"]["darwin-aarch64"]
-    with _pinned(asset, archive):
-        path = binaries.resolve("difft")
-        assert path.exists()
-        assert path.read_bytes() == payload
-        # Second call should use cache (no further fetch).
-        fake_urlopen.pop(url)  # remove so a refetch would error
-        path2 = binaries.resolve("difft")
+    path = binaries.resolve("difft")
+    assert path.exists()
+    assert path.read_bytes() == payload
+    # Second call should use cache (no further fetch).
+    fake_urlopen.pop(url)  # remove so a refetch would error
+    path2 = binaries.resolve("difft")
     assert path2 == path
 
 
-def test_fetch_extract_zip(monkeypatch, fake_urlopen):
+def test_fetch_extract_zip(monkeypatch, fake_urlopen, allow_unverified):
     _set_platform(monkeypatch, sys_plat="win32", machine="AMD64")
     monkeypatch.setattr(binaries.shutil, "which", lambda _name: None)
     payload = b"MZfake"
@@ -281,9 +289,7 @@ def test_fetch_extract_zip(monkeypatch, fake_urlopen):
     url = "https://github.com/boyter/scc/releases/download/v3.5.0/scc_Windows_x86_64.zip"
     fake_urlopen[url] = archive
 
-    asset = binaries._registry()["tools"]["scc"]["assets"]["windows-x86_64"]
-    with _pinned(asset, archive):
-        path = binaries.resolve("scc")
+    path = binaries.resolve("scc")
     assert path.exists()
     assert path.name.endswith("scc.exe")
     assert path.read_bytes() == payload
@@ -293,7 +299,7 @@ def test_download_retries_transient_network_failure(monkeypatch, tmp_path):
     attempts = 0
     sleeps: list[float] = []
 
-    def flaky_urlopen(req, timeout=None):  # noqa: ARG001
+    def flaky_urlopen(req, timeout=None, context=None):  # noqa: ARG001
         nonlocal attempts
         attempts += 1
         if attempts < 3:
@@ -320,7 +326,6 @@ def test_sha256_mismatch_raises_and_deletes(monkeypatch, fake_urlopen, tmp_path)
     # Override the registry entry for difft to include a bogus sha256.
     reg = binaries._registry()
     asset = reg["tools"]["difft"]["assets"]["darwin-aarch64"]
-    original = asset.get("sha256")
     asset["sha256"] = "deadbeef" * 8  # wrong
     archive = _make_tar_gz({"difft": b"hi"})
     fake_urlopen[asset["url"]] = archive
@@ -329,7 +334,7 @@ def test_sha256_mismatch_raises_and_deletes(monkeypatch, fake_urlopen, tmp_path)
         with pytest.raises(binaries.Sha256Mismatch):
             binaries.resolve("difft")
     finally:
-        asset["sha256"] = original  # restore
+        asset["sha256"] = None  # restore
 
 
 def test_sha256_match_passes(monkeypatch, fake_urlopen):
@@ -339,14 +344,104 @@ def test_sha256_match_passes(monkeypatch, fake_urlopen):
     good = hashlib.sha256(archive).hexdigest()
     reg = binaries._registry()
     asset = reg["tools"]["difft"]["assets"]["darwin-aarch64"]
-    original = asset.get("sha256")
     asset["sha256"] = good
     fake_urlopen[asset["url"]] = archive
     try:
         path = binaries.resolve("difft")
         assert path.read_bytes() == b"hello"
     finally:
-        asset["sha256"] = original
+        asset["sha256"] = None
+
+
+# -------- Unpinned downloads fail closed (A-7) --------------------------- #
+
+
+def test_unpinned_asset_is_refused_and_partial_deleted(monkeypatch, fake_urlopen):
+    """An asset with no registry pin must raise, not fall back to HTTPS trust.
+
+    The autouse fixture has already nulled every shipped pin, which is exactly
+    the shape of an off-registry version override.
+    """
+    _set_platform(monkeypatch, sys_plat="darwin", machine="arm64")
+    monkeypatch.setattr(binaries.shutil, "which", lambda _name: None)
+    asset = binaries._registry()["tools"]["difft"]["assets"]["darwin-aarch64"]
+    assert asset["sha256"] is None
+    fake_urlopen[asset["url"]] = _make_tar_gz({"difft": b"untrusted"})
+
+    # Caught as BinaryError so the assertion is about behaviour, not the name
+    # of the subclass; the type is pinned on the next line.
+    with pytest.raises(binaries.BinaryError) as exc:
+        binaries.resolve("difft")
+    assert type(exc.value) is binaries.UnpinnedDownload
+    assert "HEADROOM_BINARIES_ALLOW_UNVERIFIED" in str(exc.value)
+    # Nothing unverified is left in the cache for a later call to pick up.
+    # Version read from the registry, not hardcoded: a hardcoded one silently
+    # starts asserting about a path that never existed after a version bump.
+    version = binaries._registry()["tools"]["difft"]["version"]
+    assert not binaries._cached_path("difft", version, binaries.detect_platform()).exists()
+
+
+def test_unpinned_asset_allowed_by_escape_hatch_warns_on_stderr(
+    monkeypatch, fake_urlopen, capsys, allow_unverified
+):
+    """The escape hatch still installs, but says so where an operator sees it."""
+    _set_platform(monkeypatch, sys_plat="darwin", machine="arm64")
+    monkeypatch.setattr(binaries.shutil, "which", lambda _name: None)
+    asset = binaries._registry()["tools"]["difft"]["assets"]["darwin-aarch64"]
+    fake_urlopen[asset["url"]] = _make_tar_gz({"difft": b"untrusted"})
+
+    path = binaries.resolve("difft")
+    assert path.read_bytes() == b"untrusted"
+    err = capsys.readouterr().err
+    assert "WITHOUT sha256 verification" in err
+    assert "HEADROOM_BINARIES_ALLOW_UNVERIFIED" in err
+
+
+def test_verify_download_bytes_refuses_unpinned_url():
+    with pytest.raises(binaries.BinaryError) as exc:
+        binaries.verify_download_bytes(
+            b"payload", url="https://example.test/off-registry.tar.gz", name="some-tool"
+        )
+    assert type(exc.value) is binaries.UnpinnedDownload
+    assert "off-registry.tar.gz" in str(exc.value)
+
+
+def test_verify_download_bytes_escape_hatch_warns_on_stderr(capsys, allow_unverified):
+    binaries.verify_download_bytes(
+        b"payload", url="https://example.test/off-registry.tar.gz", name="some-tool"
+    )
+    assert "WITHOUT sha256 verification" in capsys.readouterr().err
+
+
+def test_verify_download_bytes_checks_a_pinned_url():
+    payload = b"payload"
+    asset = binaries._registry()["tools"]["difft"]["assets"]["darwin-aarch64"]
+    asset["sha256"] = hashlib.sha256(payload).hexdigest()
+    try:
+        binaries.verify_download_bytes(payload, url=asset["url"], name="difft")
+        with pytest.raises(binaries.Sha256Mismatch):
+            binaries.verify_download_bytes(b"tampered", url=asset["url"], name="difft")
+    finally:
+        asset["sha256"] = None
+
+
+def test_every_shipped_asset_is_pinned():
+    """The fail-closed guard is only safe because the registry pins everything.
+
+    Enforced against the published assets by the tools-hash-refresh workflow;
+    checked here so a new unpinned entry fails fast in unit tests too. Reads
+    the registry from disk because the autouse fixture nulls the live pins.
+    """
+    import json
+
+    registry = json.loads(binaries._REGISTRY_PATH.read_text(encoding="utf-8"))
+    unpinned = [
+        f"{tool}/{key}"
+        for tool, entry in registry.get("tools", {}).items()
+        for key, asset in entry.get("assets", {}).items()
+        if not asset.get("sha256")
+    ]
+    assert unpinned == []
 
 
 # -------- status() ------------------------------------------------------- #
@@ -377,7 +472,7 @@ def test_ensure_tools_survives_readonly_cache_dir(monkeypatch, tmp_path):
         readonly_parent.chmod(0o700)  # so pytest tmp cleanup succeeds
 
 
-def test_ensure_tools_partial_failure_proxy_still_starts(monkeypatch):
+def test_ensure_tools_partial_failure_proxy_still_starts(monkeypatch, allow_unverified):
     """If one tool fails to fetch, others still install and ensure_tools returns."""
     _set_platform(monkeypatch, sys_plat="darwin", machine="arm64")
     monkeypatch.setattr(binaries.shutil, "which", lambda _name: None)
@@ -385,7 +480,7 @@ def test_ensure_tools_partial_failure_proxy_still_starts(monkeypatch):
     scc_asset = binaries._registry()["tools"]["scc"]["assets"]["darwin-aarch64"]
     scc_tar = _make_tar_gz({"scc": b"ok"})
 
-    def selective_urlopen(req, timeout=None):  # noqa: ARG001
+    def selective_urlopen(req, timeout=None, context=None):  # noqa: ARG001
         url = req.full_url if hasattr(req, "full_url") else req
         if url == scc_asset["url"]:
             return _FakeResponse(scc_tar)
@@ -396,8 +491,7 @@ def test_ensure_tools_partial_failure_proxy_still_starts(monkeypatch):
 
     monkeypatch.setattr(binaries.urllib.request, "urlopen", selective_urlopen)
 
-    with _pinned(scc_asset, scc_tar):
-        result = binaries.ensure_tools(quiet=True)
+    result = binaries.ensure_tools(quiet=True)
     # scc succeeded; difft failed but ensure_tools() did not crash.
     assert result["scc"] is not None
     assert result["difft"] is None
@@ -411,6 +505,50 @@ def test_status_reports_every_registered_tool(monkeypatch):
     assert {"difft", "scc", "ast-grep"} <= names
     for r in rows:
         assert r["state"] in ("on-path", "cached", "missing", "unsupported-platform")
+
+
+# -------- HEADROOM_BINARIES_ALLOW_UNVERIFIED (security: fail closed) ------- #
+
+
+def _write(tmp_path, data: bytes):
+    p = tmp_path / "asset.bin"
+    p.write_bytes(data)
+    return p
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "  "])
+def test_allow_unverified_non_affirmative_still_verifies(monkeypatch, tmp_path, value):
+    # A security bypass must fail CLOSED: only an explicit affirmative disables
+    # verification. Setting the var to "0"/"false" (the natural way to say "keep
+    # verifying") previously passed a bare presence check and silently skipped
+    # sha256 verification of the downloaded binary.
+    monkeypatch.setenv("HEADROOM_BINARIES_ALLOW_UNVERIFIED", value)
+    path = _write(tmp_path, b"payload")
+    with pytest.raises(binaries.Sha256Mismatch):
+        binaries._verify_sha256(path, "deadbeef" * 8)  # wrong pin
+
+
+def test_allow_unverified_unset_still_verifies(monkeypatch, tmp_path):
+    monkeypatch.delenv("HEADROOM_BINARIES_ALLOW_UNVERIFIED", raising=False)
+    path = _write(tmp_path, b"payload")
+    with pytest.raises(binaries.Sha256Mismatch):
+        binaries._verify_sha256(path, "deadbeef" * 8)
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+def test_allow_unverified_affirmative_skips_verification(monkeypatch, tmp_path, value):
+    monkeypatch.setenv("HEADROOM_BINARIES_ALLOW_UNVERIFIED", value)
+    path = _write(tmp_path, b"payload")
+    # Wrong pin, but an explicit affirmative bypass returns without raising.
+    binaries._verify_sha256(path, "deadbeef" * 8)
+
+
+def test_verify_download_bytes_zero_still_verifies(monkeypatch):
+    # Same fail-closed contract on the in-memory installer path.
+    monkeypatch.setenv("HEADROOM_BINARIES_ALLOW_UNVERIFIED", "0")
+    monkeypatch.setattr(binaries, "sha256_for_url", lambda _url: "deadbeef" * 8)
+    with pytest.raises(binaries.Sha256Mismatch):
+        binaries.verify_download_bytes(b"payload", url="https://x/y", name="y")
 
 
 # -------- Registry key hygiene ------------------------------------------- #

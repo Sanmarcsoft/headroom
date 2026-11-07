@@ -1,24 +1,32 @@
 """Fetcher for bundled CLI tool binaries.
 
-pip install headroom-ai pulls ast-grep-cli as a proper PyPI binary wheel
+`pip install headroom-ai` pulls `ast-grep-cli` as a proper PyPI binary wheel
 (core dependency), so ast-grep is always on PATH. The other two high-value
-tools (difft and scc) are fetched from pinned upstream GitHub releases at
-proxy startup, verified by SHA256, cached per-user, and exec'd.
+tools — `difft` (difftastic) and `scc` — are fetched from pinned upstream
+GitHub releases at proxy startup, verified, cached per-user, and exec'd.
 
 Supported platforms: linux (glibc + musl) x86_64/aarch64, macOS x86_64/arm64,
 Windows x86_64. Unsupported platforms raise PlatformNotSupported; callers in
 the compression pipeline should fall back to their non-accelerated path.
 
+Every asset this package ships is pinned by SHA-256 in `tools.json`, and the
+tools-hash-refresh CI gate fails the build if a pin is missing or stale. So
+verification fails closed: a download whose URL carries no pin is refused
+rather than trusted on transport (HTTPS) alone.
+
 Env vars:
-    HEADROOM_BINARIES_MIRROR          base URL that replaces github.com
-                                      (requires matching CONFIRM)
-    HEADROOM_BINARIES_MIRROR_CONFIRM  must exactly equal MIRROR to activate
-                                      (prevents accidental activation from
-                                      inherited env; also rejects http://)
-    HEADROOM_BINARIES_CACHE           override cache dir
-    HEADROOM_BINARIES_OFFLINE         if set, never reach the network
-    HEADROOM_BINARIES_ALLOW_UNPINNED  if set, missing sha256 only warns
-                                      (default is hard error to fail closed)
+    HEADROOM_BINARIES_MIRROR   base URL that replaces https://github.com
+    HEADROOM_BINARIES_CACHE    override cache dir
+    HEADROOM_BINARIES_OFFLINE  if set, never reach the network
+    HEADROOM_BINARIES_ALLOW_UNVERIFIED
+        Escape hatch: only 1, true, yes, or on (case-insensitive, with surrounding
+        whitespace ignored) skip SHA-256 verification and accept whatever the
+        mirror served. Unset, false, and unrecognized values retain verification.
+        This disables Headroom's only defence
+        against a tampered or substituted binary, so it is announced on
+        stderr every time it takes effect. Intended for developers testing a
+        locally built asset or an off-registry version; never set it in CI or
+        in production. Pin the asset in `tools.json` instead.
 """
 
 from __future__ import annotations
@@ -42,21 +50,36 @@ import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import ssl
 
 from headroom._subprocess import run
-from headroom.envflags import env_flag_enabled
+from headroom.offline import guard_egress
 
 logger = logging.getLogger(__name__)
+
+# Affirmative values for the sha256-verification bypass. This is a security
+# control (supply-chain integrity), so it must fail CLOSED: only an explicit
+# affirmative disables verification. A bare presence check treated
+# `HEADROOM_BINARIES_ALLOW_UNVERIFIED=0` / `=false` — the natural way to say
+# "keep verifying" — as truthy and silently skipped verification.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _allow_unverified_binaries() -> bool:
+    """Whether sha256 verification of fetched binaries is bypassed."""
+    return os.environ.get("HEADROOM_BINARIES_ALLOW_UNVERIFIED", "").strip().lower() in _TRUTHY
+
 
 __all__ = [
     "BinaryError",
     "BinaryFetchError",
     "PlatformNotSupported",
     "Sha256Mismatch",
-    "Sha256Unpinned",
+    "UnpinnedDownload",
     "OfflineError",
-    "MirrorNotConfirmed",
     "PlatformKey",
     "detect_platform",
     "cache_dir",
@@ -86,38 +109,20 @@ class Sha256Mismatch(BinaryError):
     """Raised when a downloaded asset's SHA256 does not match the pin."""
 
 
-class Sha256Unpinned(BinaryError):
-    """Raised when an asset has no sha256 pin and HEADROOM_BINARIES_ALLOW_UNPINNED is not set."""
+class UnpinnedDownload(BinaryError):
+    """Raised when a downloaded asset has no SHA256 pin to verify it against.
+
+    Every shipped asset is pinned (tools-hash-refresh CI gate), so a missing
+    pin means an off-registry fetch — a version override, a hand-edited
+    registry, or a URL an installer built that the registry does not describe.
+    Accepting it would silently downgrade integrity to transport trust, so we
+    refuse. Pin the asset in `tools.json`, or set
+    HEADROOM_BINARIES_ALLOW_UNVERIFIED=1 to accept the risk explicitly.
+    """
 
 
 class OfflineError(BinaryError):
     """Raised when a network fetch is required but HEADROOM_BINARIES_OFFLINE is set."""
-
-
-class MirrorNotConfirmed(BinaryError):
-    """Raised when HEADROOM_BINARIES_MIRROR is set without a matching CONFIRM
-    value or when the mirror uses an insecure http:// scheme.
-    """
-
-
-def _mirror_url(url: str) -> str:
-    mirror = os.environ.get("HEADROOM_BINARIES_MIRROR")
-    if not mirror:
-        return url
-    confirm = os.environ.get("HEADROOM_BINARIES_MIRROR_CONFIRM")
-    if confirm != mirror:
-        raise MirrorNotConfirmed(
-            f"HEADROOM_BINARIES_MIRROR is set to {mirror} but "
-            f"HEADROOM_BINARIES_MIRROR_CONFIRM does not match it. "
-            f"Set both to the same https:// value to confirm."
-        )
-    if not mirror.startswith("https://"):
-        raise MirrorNotConfirmed("Mirror must be https:// (http is rejected)")
-    # Only substitute the github.com host so that paths remain intact.
-    for prefix in ("https://github.com", "https://objects.githubusercontent.com"):
-        if url.startswith(prefix):
-            return mirror.rstrip("/") + url[len(prefix) :]
-    return url
 
 
 # ---------- Platform detection -------------------------------------------- #
@@ -261,12 +266,49 @@ def _asset_for_platform(tool: str, plat: PlatformKey) -> dict[str, Any]:
     return asset
 
 
+def _mirror_url(url: str) -> str:
+    mirror = os.environ.get("HEADROOM_BINARIES_MIRROR")
+    if not mirror:
+        return url
+    if not mirror.startswith("https://"):
+        raise BinaryFetchError(f"HEADROOM_BINARIES_MIRROR must use https:// (got {mirror!r})")
+    # Only substitute the github.com host so that paths remain intact.
+    for prefix in ("https://github.com", "https://objects.githubusercontent.com"):
+        if url.startswith(prefix):
+            return mirror.rstrip("/") + url[len(prefix) :]
+    return url
+
+
 # ---------- Download + verify --------------------------------------------- #
+
+
+def _ssl_context() -> ssl.SSLContext | None:
+    """Return Headroom's configured SSL context for urllib.request.urlopen, or
+    ``None`` (urlopen's default) when the trust helper cannot be loaded.
+
+    This ensures binary downloads from GitHub releases (and any configured
+    mirror) trust the same roots as the proxy — including corporate
+    TLS-inspection roots installed in the OS store and bundles referenced via
+    ``HEADROOM_CA_BUNDLE`` / ``SSL_CERT_FILE``. Without this, ``uv tool``
+    installs (where certifi may not yet be wired to the stdlib path) raise
+    ``CERTIFICATE_VERIFY_FAILED`` even though certifi is already a dependency.
+    """
+    try:
+        from headroom.proxy.ssl_context import build_urlopen_context
+    except ImportError:
+        return None
+
+    return build_urlopen_context()
 
 
 def _download(url: str, dest: Path, *, progress: bool = True) -> None:
     if os.environ.get("HEADROOM_BINARIES_OFFLINE"):
         raise OfflineError(f"offline mode (HEADROOM_BINARIES_OFFLINE=1) but fetch required: {url}")
+    # HEADROOM_BINARIES_OFFLINE above is the narrow, binaries-only switch; this
+    # is the deployment-wide one. An operator who set the air-gap switch should
+    # not have to also discover a second, differently-named flag to stop
+    # Headroom fetching release assets from GitHub at install time.
+    guard_egress("release binary download", url)
     if not _has_writable_existing_parent(dest.parent):
         raise OSError(f"binary cache directory parent is not writable: {dest.parent}")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -276,10 +318,18 @@ def _download(url: str, dest: Path, *, progress: bool = True) -> None:
     if not final_url.startswith("https://"):
         raise BinaryFetchError(f"refusing non-https download URL: {final_url!r}")
     req = urllib.request.Request(final_url, headers={"User-Agent": "headroom-binaries/1"})
+    try:
+        ctx = _ssl_context()
+    except Exception as e:
+        raise BinaryFetchError(f"failed to configure TLS trust for binary download: {e}") from e
     attempts = 3
     for attempt in range(1, attempts + 1):
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310 (https)
+            if ctx is not None:
+                resp = urllib.request.urlopen(req, timeout=60, context=ctx)  # noqa: S310 (https)
+            else:
+                resp = urllib.request.urlopen(req, timeout=60)  # noqa: S310 (https)
+            with resp:
                 total = int(resp.headers.get("Content-Length") or 0)
                 _stream_to(resp, dest, total, label=dest.name, show_progress=progress)
             return
@@ -336,29 +386,47 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _allow_unverified(name: str) -> bool:
+    """True if the escape hatch is set — announced loudly each time it fires.
+
+    Skipping verification turns a supply-chain guarantee into transport trust,
+    so it goes to stderr as well as the logger: the logger is frequently
+    unconfigured at proxy startup, and a silent downgrade is the failure mode
+    this whole module exists to avoid.
+
+    Exactly once, though. With no handlers configured, logging's ``lastResort``
+    already writes WARNING to stderr, so printing unconditionally produced the
+    same sentence twice. Print only when a handler exists -- that is precisely
+    when ``lastResort`` will not fire, and when the log may be going somewhere
+    an operator is not watching, such as a file.
+    """
+    if not _allow_unverified_binaries():
+        return False
+    message = (
+        f"headroom: WARNING: accepting {name} WITHOUT sha256 verification "
+        "(HEADROOM_BINARIES_ALLOW_UNVERIFIED is set). A tampered or "
+        "substituted binary will not be detected."
+    )
+    logger.warning("%s", message)
+    if logger.hasHandlers():
+        print(message, file=sys.stderr)
+    return True
+
+
 def _verify_sha256(path: Path, expected: str | None) -> None:
-    if os.environ.get("HEADROOM_BINARIES_ALLOW_UNVERIFIED"):
-        logger.warning(
-            "skipping sha256 verification for %s (HEADROOM_BINARIES_ALLOW_UNVERIFIED=1)",
-            path.name,
-        )
+
+    if _allow_unverified(path.name):
         return
     if not expected:
-        # Strict parse, not truthiness. A bare os.environ.get() treats
-        # HEADROOM_BINARIES_ALLOW_UNPINNED=0 and =false as ENABLED, which is the
-        # opposite of what an operator typing them intends, and this flag is the
-        # one that guards whether unverified bytes get executed.
-        if env_flag_enabled("HEADROOM_BINARIES_ALLOW_UNPINNED"):
-            logger.warning(
-                "binary %s downloaded without sha256 pin "
-                "(HEADROOM_BINARIES_ALLOW_UNPINNED is set; this is a supply-chain risk)",
-                path.name,
-            )
-            return
+        # No pin in the registry. All shipped assets ARE pinned — enforced by
+        # the tools-hash-refresh CI gate — so a missing pin means an
+        # off-registry fetch. Fail closed: HTTPS proves only who served the
+        # bytes, not that they are the bytes we pinned.
         path.unlink(missing_ok=True)
-        raise Sha256Unpinned(
-            f"binary {path.name} has no sha256 pin in tools.json; "
-            "set HEADROOM_BINARIES_ALLOW_UNPINNED=1 to allow (risky)"
+        raise UnpinnedDownload(
+            f"refusing unpinned download {path.name}: no sha256 in the registry. "
+            "Pin it in headroom/tools.json (scripts/refresh_tool_hashes.py), or set "
+            "HEADROOM_BINARIES_ALLOW_UNVERIFIED=1 to accept it unverified."
         )
     got = _sha256_file(path)
     if got.lower() != expected.lower():
@@ -379,22 +447,27 @@ def sha256_for_url(url: str) -> str | None:
 def verify_download_bytes(data: bytes, *, url: str, name: str) -> None:
     """Fail-closed integrity check for an in-memory downloaded archive.
 
-    Used by installers (rtk, lean-ctx, codebase-memory-mcp) that download and
-    extract on their own instead of going through the fetch path above. Verifies
-    the bytes against the tools.json pin for ``url`` and refuses an unpinned URL
-    unless HEADROOM_BINARIES_ALLOW_UNVERIFIED=1.
+    Used by installers (codebase-memory-mcp) that download and extract on their
+    own instead of going through the fetch path above. Verifies the bytes
+    against the tools.json pin for ``url``.
+
+    Raises UnpinnedDownload if ``url`` has no pin in the registry and
+    Sha256Mismatch if the bytes do not match it. Setting
+    HEADROOM_BINARIES_ALLOW_UNVERIFIED=1 skips both checks.
     """
-    if os.environ.get("HEADROOM_BINARIES_ALLOW_UNVERIFIED"):
-        logger.warning(
-            "skipping sha256 verification for %s (HEADROOM_BINARIES_ALLOW_UNVERIFIED=1)", name
-        )
+
+    if _allow_unverified(name):
         return
     expected = sha256_for_url(url)
     if not expected:
-        # Off-registry URL (e.g. a version override); shipped assets are all
-        # pinned via the CI gate, so fall back to HTTPS trust here.
-        logger.info("%s downloaded without sha256 pin (HTTPS trust only)", name)
-        return
+        # Off-registry URL — a version override, or an installer building a
+        # filename the registry does not carry. Refuse rather than silently
+        # downgrading to transport trust.
+        raise UnpinnedDownload(
+            f"refusing unpinned download {name}: {url} has no sha256 in the registry. "
+            "Pin it in headroom/tools.json (scripts/refresh_tool_hashes.py), or set "
+            "HEADROOM_BINARIES_ALLOW_UNVERIFIED=1 to accept it unverified."
+        )
     got = hashlib.sha256(data).hexdigest()
     if got.lower() != expected.lower():
         raise Sha256Mismatch(f"sha256 mismatch for {name}: expected {expected}, got {got}")
@@ -527,7 +600,8 @@ def resolve(tool: str) -> Path:
 
     Raises PlatformNotSupported if the tool is unavailable on this platform,
     OfflineError if a fetch is required but HEADROOM_BINARIES_OFFLINE is set,
-    Sha256Mismatch if verification fails, BinaryFetchError on other IO errors.
+    Sha256Mismatch if verification fails, UnpinnedDownload if the asset carries
+    no registry pin, BinaryFetchError on other IO errors.
     """
     on_path = _path_lookup(tool)
     if on_path:
@@ -555,10 +629,6 @@ def resolve(tool: str) -> Path:
         url_path = urllib.parse.urlparse(url).path
         download_path = tmp_dir / (Path(url_path).name or "download")
         _download(url, download_path)
-        # Verification runs on the downloaded temp file before extraction
-        # and applies equally whether the source was GitHub, a mirror, or
-        # any other URL. With the unpinned guard below, a mirror cannot
-        # serve unpinned bytes.
         _verify_sha256(download_path, sha256)
         staging = tmp_dir / "out"
         _extract(download_path, member, staging)
@@ -587,10 +657,8 @@ def ensure_tools(quiet: bool = False) -> dict[str, Path | None]:
     PATH, already cached, or distributed via PyPI-only (ast-grep).
 
     Returns a map of tool_name -> resolved Path (or None if unsupported).
-    Never raises; PlatformNotSupported, OfflineError, BinaryFetchError,
-    Sha256Mismatch, Sha256Unpinned, MirrorNotConfirmed, and OSError are
-    caught so proxy startup degrades gracefully (tool skipped, message on
-    stderr).
+    Never raises; unsupported platforms or offline errors are logged via
+    stderr and the tool is skipped.
     """
     out: dict[str, Path | None] = {}
     for name in _registry().get("tools", {}):
@@ -600,37 +668,19 @@ def ensure_tools(quiet: bool = False) -> dict[str, Path | None]:
                 out[name] = _path_lookup(name)
                 continue
             out[name] = resolve(name)
-        except (Sha256Mismatch, MirrorNotConfirmed) as e:
-            # INTEGRITY FAILURE, not a routine skip. A hash mismatch is the
-            # single highest-signal indicator that something tampered with the
-            # download path: a compromised release asset, a MITM, a poisoned
-            # mirror. The bytes are already deleted and never executed, so this
-            # is not an RCE path, but logging it identically to "this platform
-            # is unsupported" means the one event worth paging on is
-            # indistinguishable from weather. Separate class, error level,
-            # greppable marker.
-            out[name] = None
-            logger.error(
-                "event=binary_integrity_failure tool=%s error=%s "
-                "(downloaded bytes were rejected and deleted; investigate the "
-                "download path before re-running)",
-                name,
-                e,
-            )
-            if not quiet:
-                print(f"headroom: INTEGRITY FAILURE for {name}: {e}", file=sys.stderr)
         except (
             PlatformNotSupported,
             OfflineError,
             BinaryFetchError,
-            Sha256Unpinned,
+            Sha256Mismatch,
+            # An unpinned asset is refused, not installed. Startup still
+            # degrades to "tool missing" rather than failing outright.
+            UnpinnedDownload,
             # Catch readonly / sandboxed filesystems (e.g. containerized
             # home dirs) so proxy startup never fails because the cache dir
             # can't be created. The interceptor fall back to no-op.
             OSError,
         ) as e:
-            # Benign: unsupported platform, offline, no pin configured, or an
-            # unwritable cache dir. Skipping is the correct response.
             out[name] = None
             if not quiet:
                 print(f"headroom: skipping {name}: {e}", file=sys.stderr)

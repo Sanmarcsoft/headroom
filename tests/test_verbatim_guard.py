@@ -323,10 +323,12 @@ class TestRouterWiring:
         assert seen, "log output must still be handed to the compressor"
         assert out == "MANGLED"
 
-    def test_json_records_still_reach_the_model(self, monkeypatch) -> None:
-        router = self._router()
-        seen = self._stub_model(router, monkeypatch)
+    def test_json_records_are_not_the_guards_doing(self) -> None:
+        """Upstream 0.43 keeps JSON record sets out of the ML compressor on its
+        own (``_contains_protected_json`` returns them untouched before the
+        guard runs), so the router no longer hands them to the model. What this
+        fork still has to prove is that the verbatim guard itself is not
+        over-broad: bulk record data is not source code, config or doctrine."""
+        from headroom.transforms.verbatim_guard import classify_verbatim
 
-        router._try_ml_compressor(JSON_RECORDS, context="")
-
-        assert seen, "record-set JSON must stay compressible"
+        assert classify_verbatim(JSON_RECORDS) is None

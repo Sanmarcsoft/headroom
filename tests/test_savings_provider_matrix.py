@@ -25,6 +25,13 @@ from tests._dotenv import (
     importorskip_no_env_leak,
     load_env_overrides,
 )
+from tests._pricing_models import anthropic_pricing_model
+
+MODEL = anthropic_pricing_model(
+    "input_cost_per_token_above_200k_tokens",
+    "cache_creation_input_token_cost",
+    "cache_read_input_token_cost",
+)
 
 _env_overrides = load_env_overrides()
 apply_dotenv = autouse_apply_env(_env_overrides)
@@ -36,14 +43,14 @@ from headroom.proxy.savings_tracker import estimate_request_savings_usd  # noqa:
 # One warm turn per provider, in that provider's own reporting shape.
 WARM_TURNS = {
     "anthropic": {
-        "model": "claude-sonnet-4-20250514",
+        "model": MODEL,
         "cache_read_tokens": 180_000,
         "cache_write_tokens": 2_000,
         "cache_write_5m_tokens": 2_000,
         "uncached_input_tokens": 500,
     },
     "bedrock": {
-        "model": "claude-sonnet-4-20250514",
+        "model": MODEL,
         "cache_read_tokens": 180_000,
         "cache_write_tokens": 2_000,
         "cache_write_5m_tokens": 2_000,
@@ -132,7 +139,7 @@ def test_a_provider_that_reports_no_cache_data_prices_at_list_and_says_so():
     not presented as a measurement.
     """
     priced = estimate_request_savings_usd(
-        model="claude-sonnet-4-20250514",
+        model=MODEL,
         compression_tokens_saved=5_000,
         tool_schema_tokens_saved=5_000,
     )
@@ -180,7 +187,7 @@ def test_the_headline_degrades_to_the_weakest_provider_in_a_mixed_session():
     not present its total as catalog-grade.
     """
     priced = estimate_request_savings_usd(
-        model="claude-sonnet-4-20250514",
+        model=MODEL,
         # Priced against a real mix...
         compression_tokens_saved=5_000,
         cache_read_tokens=100_000,
@@ -193,7 +200,7 @@ def test_the_headline_degrades_to_the_weakest_provider_in_a_mixed_session():
 
     # ...but the same layers with nothing reported cannot claim the same.
     blind = estimate_request_savings_usd(
-        model="claude-sonnet-4-20250514",
+        model=MODEL,
         compression_tokens_saved=5_000,
     )
     assert blind["basis"] == "no-mix"
@@ -206,7 +213,7 @@ def test_long_context_requests_price_at_the_above_200k_tier():
     request's savings at base rates understates them by half.
     """
     base = estimate_request_savings_usd(
-        model="claude-sonnet-4-20250514",
+        model=MODEL,
         compression_tokens_saved=5_000,
         cache_write_tokens=50_000,
         cache_write_5m_tokens=50_000,
@@ -214,7 +221,7 @@ def test_long_context_requests_price_at_the_above_200k_tier():
         provider="anthropic",
     )
     long_ctx = estimate_request_savings_usd(
-        model="claude-sonnet-4-20250514",
+        model=MODEL,
         compression_tokens_saved=5_000,
         cache_write_tokens=250_000,
         cache_write_5m_tokens=250_000,
@@ -224,3 +231,58 @@ def test_long_context_requests_price_at_the_above_200k_tier():
 
     assert long_ctx["compression"] > base["compression"]
     assert long_ctx["compression_list"] > base["compression_list"]
+
+
+def test_long_context_tier_threshold_is_read_per_model():
+    """Claude Haiku 5.5's long-prompt card starts at 100K, not the usual 200K.
+
+    A 150K prompt sits between the two: it must be priced at Haiku's 5x card,
+    which a shared 200K threshold would miss.
+    """
+    import litellm
+
+    from headroom.pricing.counterfactual import long_context_threshold
+
+    if "input_cost_per_token_above_100k_tokens" not in litellm.model_cost.get(
+        "claude-haiku-5-5", {}
+    ):
+        pytest.skip("installed LiteLLM catalog predates Claude Haiku 5.5")
+
+    assert long_context_threshold("claude-haiku-5-5") == 100_000
+    assert long_context_threshold(MODEL) == 200_000
+
+    def _saved(uncached: int) -> dict:
+        return estimate_request_savings_usd(
+            model="claude-haiku-5-5",
+            compression_tokens_saved=1_000,
+            uncached_input_tokens=uncached,
+            provider="anthropic",
+        )
+
+    # 1K tokens at $0.10/M below the threshold, at $0.50/M above it.
+    assert _saved(90_000)["compression_list"] == pytest.approx(1_000 * 1e-7)
+    assert _saved(150_000)["compression_list"] == pytest.approx(1_000 * 5e-7)
+
+
+def test_compression_that_crosses_the_tier_credits_the_whole_premium():
+    """110K compressed to 90K on Haiku 5.5 avoids the 5x card on every token.
+
+    Uncompressed: 110K x $0.50/M = $0.055. Forwarded: 90K x $0.10/M = $0.009.
+    The saving is $0.046, not the removed 20K at the base rate ($0.002).
+    """
+    import litellm
+
+    if "input_cost_per_token_above_100k_tokens" not in litellm.model_cost.get(
+        "claude-haiku-5-5", {}
+    ):
+        pytest.skip("installed LiteLLM catalog predates Claude Haiku 5.5")
+
+    saved = estimate_request_savings_usd(
+        model="claude-haiku-5-5",
+        compression_tokens_saved=20_000,
+        uncached_input_tokens=90_000,
+        provider="anthropic",
+    )
+    assert saved["compression"] == pytest.approx(0.055 - 0.009)
+    # The list companion prices only the removed tokens, at the long card.
+    assert saved["compression_list"] == pytest.approx(20_000 * 5e-7)

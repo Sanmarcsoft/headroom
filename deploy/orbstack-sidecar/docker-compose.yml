@@ -94,6 +94,8 @@ services:
       # these keep it off even if an upstream sync flips that default back.
       HEADROOM_BEACON: "off"
       DO_NOT_TRACK: "1"
+      # The proxy has no business polling PyPI for newer releases (upstream 0.43: on by default, opt-out).
+      HEADROOM_UPDATE_CHECK: "off"
       # LiteLLM is only a price table here; skip its network fetch at import.
       LITELLM_LOCAL_MODEL_COST_MAP: "True"
       # Bearer token for /v1/*. The proxy binds 0.0.0.0 on a shared docker network,
