@@ -18,6 +18,11 @@ cd "$REPO_ROOT"
 
 IMAGE_REPO="${IMAGE_REPO:-sanmarcsoft/headroom}"
 TARGET="${TARGET:-runtime}"
+# The Dockerfile default (proxy,code,bedrock) is upstream's and is left alone so
+# fork syncs stay clean. The sidecar adds `otel` so HEADROOM_OTEL_METRICS_ENABLED=1
+# can actually export: without the OTLP exporter package the proxy has nothing to
+# send with (Sanmarcsoft/headroom#73).
+HEADROOM_EXTRAS="${HEADROOM_EXTRAS:-proxy,code,bedrock,otel}"
 
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   echo "error: not a git repository: $REPO_ROOT" >&2
@@ -35,6 +40,7 @@ fi
 echo "==> building ${IMAGE}"
 echo "    repo:   ${REPO_ROOT}"
 echo "    target: ${TARGET}"
+echo "    extras: ${HEADROOM_EXTRAS}"
 echo "    arch:   $(uname -m)"
 
 # Built for the host's native architecture. This is a local development
@@ -42,6 +48,7 @@ echo "    arch:   $(uname -m)"
 # the cross-compile rule for Scaleway/NAS images does not apply here.
 docker build \
   --target "${TARGET}" \
+  --build-arg "HEADROOM_EXTRAS=${HEADROOM_EXTRAS}" \
   --tag "${IMAGE}" \
   --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
   --label "org.opencontainers.image.source=$(git config --get remote.origin.url || echo unknown)" \
